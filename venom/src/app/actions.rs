@@ -78,7 +78,7 @@ impl VenomApp {
 
                 match Vault::open(&vault_path, &password) {
                     Ok(vault) => {
-                        // Vault opened → update status before blocking on FUSE mount.
+                        // Vault opened — update status before blocking on FUSE mount.
                         *status_thread.lock().unwrap() = MountStatus::Mounted {
                             label: vault.config.label.clone(),
                             cipher: vault.config.cipher.to_string(),
@@ -86,11 +86,18 @@ impl VenomApp {
                         };
                         ctx.request_repaint();
 
-                        // Blocks until the filesystem is unmounted.
-                        if let Err(e) = driver::mount(Arc::new(vault), &mountpoint) {
-                            *status_thread.lock().unwrap() =
-                                MountStatus::Error(format!("FUSE error: {e}"));
-                            ctx.request_repaint();
+                        // Blocks until fusermount3 -u (or equivalent) tears down the mount.
+                        match driver::mount(Arc::new(vault), &mountpoint) {
+                            Ok(_) => {
+                                // Clean unmount — transition to Gone so the GUI can remove the card.
+                                *status_thread.lock().unwrap() = MountStatus::Gone;
+                                ctx.request_repaint();
+                            }
+                            Err(e) => {
+                                *status_thread.lock().unwrap() =
+                                    MountStatus::Error(format!("FUSE error: {e}"));
+                                ctx.request_repaint();
+                            }
                         }
                     }
                     Err(e) => {
@@ -122,10 +129,31 @@ impl VenomApp {
     pub fn action_unmount(&mut self, index: usize) {
         if let Some(mv) = self.mounted.get(index) {
             let mp = mv.mountpoint.clone();
-            unmount_platform(&mp);
-            self.mounted.remove(index);
-            self.set_status(format!("Unmounted {mp}"), false);
+            match unmount_platform(&mp) {
+                Ok(_) => {
+                    // Card will be auto-removed when the mount thread sets status → Gone.
+                    // If the thread is already dead (e.g. error state), remove immediately.
+                    let already_gone = !matches!(
+                        *mv.status.lock().unwrap(),
+                        MountStatus::Mounted { .. } | MountStatus::Mounting
+                    );
+                    if already_gone {
+                        self.mounted.remove(index);
+                    }
+                    self.set_status(format!("Unmounting {mp}…"), false);
+                }
+                Err(e) => {
+                    self.set_status(format!("Unmount failed: {e}"), true);
+                }
+            }
         }
+    }
+
+    /// Called every frame by update() — removes cards whose mount thread has exited.
+    pub fn gc_gone_mounts(&mut self) {
+        self.mounted.retain(|mv| {
+            !matches!(*mv.status.lock().unwrap(), MountStatus::Gone)
+        });
     }
 
     /// Remove a vault card that is in an Error state.
@@ -144,29 +172,45 @@ impl VenomApp {
 
 // ── Platform helpers ──────────────────────────────────────────────────────────
 
-fn unmount_platform(mountpoint: &str) {
+/// Send the unmount signal via the appropriate helper.
+/// Returns Ok(()) only when the helper exited with status 0.
+fn unmount_platform(mountpoint: &str) -> Result<(), String> {
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     {
-        // Try fusermount3 first (libfuse3), then fusermount (libfuse2).
-        let ok = std::process::Command::new("fusermount3")
-            .args(["-u", mountpoint])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
-            let _ = std::process::Command::new("fusermount")
-                .args(["-u", mountpoint])
-                .status();
+        // Prefer fusermount3 (libfuse3); fall back to fusermount (libfuse2).
+        for bin in &["fusermount3", "fusermount"] {
+            match std::process::Command::new(bin).args(["-u", mountpoint]).status() {
+                Ok(s) if s.success() => return Ok(()),
+                Ok(s) => {
+                    // Exited with non-zero — try the fallback before giving up.
+                    let _ = s;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    continue; // binary not installed, try next
+                }
+                Err(e) => return Err(format!("{bin}: {e}")),
+            }
         }
+        Err(format!(
+            "fusermount3/fusermount failed for '{mountpoint}'. \
+             Is the vault still mounted?"
+        ))
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("umount").arg(mountpoint).status();
+        std::process::Command::new("umount")
+            .arg(mountpoint)
+            .status()
+            .map_err(|e| e.to_string())
+            .and_then(|s| {
+                if s.success() { Ok(()) }
+                else { Err(format!("umount exited with {s}")) }
+            })
     }
     #[cfg(target_os = "windows")]
     {
-        // WinFsp / Dokan: not yet implemented.
         let _ = mountpoint;
+        Err("Unmount not yet implemented on Windows.".into())
     }
 }
 

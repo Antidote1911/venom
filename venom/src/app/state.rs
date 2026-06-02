@@ -21,6 +21,8 @@ pub enum MountStatus {
     },
     /// Mount failed (wrong password, I/O error, FUSE error…).
     Error(String),
+    /// The FUSE thread returned cleanly after unmounting — card can be removed.
+    Gone,
 }
 
 pub struct MountedVault {
@@ -64,6 +66,9 @@ impl VenomApp {
 
 impl eframe::App for VenomApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Remove cards whose mount thread has exited cleanly.
+        self.gc_gone_mounts();
+
         // Keep the UI animating while any vault is still connecting.
         let any_mounting = self.mounted.iter().any(|mv| {
             matches!(*mv.status.lock().unwrap(), MountStatus::Mounting)

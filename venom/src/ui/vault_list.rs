@@ -86,9 +86,10 @@ fn vault_card(
     to_open: &mut Option<String>,
 ) {
     let (border_color, bg) = match status {
-        MountStatus::Mounting => (theme::WARN,    Color32::from_rgb(34, 32, 20)),
-        MountStatus::Mounted { .. } => (theme::SUCCESS, Color32::from_rgb(20, 34, 24)),
-        MountStatus::Error(_) => (theme::ERROR,   Color32::from_rgb(38, 20, 20)),
+        MountStatus::Mounting        => (theme::WARN,    Color32::from_rgb(34, 32, 20)),
+        MountStatus::Mounted { .. }  => (theme::SUCCESS, Color32::from_rgb(20, 34, 24)),
+        MountStatus::Error(_)        => (theme::ERROR,   Color32::from_rgb(38, 20, 20)),
+        MountStatus::Gone            => (theme::BORDER,  theme::CARD),
     };
 
     Frame::none()
@@ -150,25 +151,19 @@ fn vault_card(
 
                         MountStatus::Error(msg) => {
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("✗")
-                                        .color(theme::ERROR)
-                                        .strong(),
-                                );
+                                ui.label(RichText::new("✗").color(theme::ERROR).strong());
                                 ui.add_space(4.0);
                                 ui.label(
-                                    RichText::new("Mount failed")
-                                        .strong()
-                                        .size(15.0)
-                                        .color(theme::ERROR),
+                                    RichText::new("Mount failed").strong().size(15.0).color(theme::ERROR),
                                 );
                             });
                             mono_row(ui, "vault", vault_path);
-                            ui.label(
-                                RichText::new(msg.as_str())
-                                    .small()
-                                    .color(theme::ERROR),
-                            );
+                            ui.label(RichText::new(msg.as_str()).small().color(theme::ERROR));
+                        }
+
+                        MountStatus::Gone => {
+                            // Transitional — gc_gone_mounts() removes this card on the next frame.
+                            ui.label(RichText::new("Unmounting…").color(theme::TEXT_MUTED).small());
                         }
                     }
                 });
@@ -213,15 +208,14 @@ fn vault_card(
                         }
                         MountStatus::Error(_) => {
                             if ui
-                                .add(
-                                    egui::Button::new("Dismiss")
-                                        .min_size(Vec2::new(80.0, 28.0)),
-                                )
+                                .add(egui::Button::new("Dismiss").min_size(Vec2::new(80.0, 28.0)))
                                 .clicked()
                             {
                                 *to_dismiss = Some(index);
                             }
                         }
+
+                        MountStatus::Gone => {} // no buttons — will be gc'd next frame
                     }
                 });
             });
