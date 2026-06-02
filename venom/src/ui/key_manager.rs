@@ -87,8 +87,10 @@ fn key_list(app: &mut VenomApp, ui: &mut Ui) {
         if app.key_manager_view.selected_fp == Some(fp) {
             app.key_manager_view.selected_fp = None;
         }
-        app.keys.remove(&fp);
-        app.set_status("Keypair deleted.", false);
+        match app.keys.remove(&fp) {
+            Ok(_)  => app.set_status("Keypair deleted.", false),
+            Err(e) => app.set_status(format!("Delete failed: {e}"), true),
+        }
     }
     if let Some(fp) = to_select {
         app.key_manager_view.selected_fp =

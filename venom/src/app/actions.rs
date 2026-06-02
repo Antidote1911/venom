@@ -135,10 +135,36 @@ impl VenomApp {
             None
         };
 
+        let selected_recipients = self.create_view.selected_recipients.clone();
+
         match VnmContainer::create(&container_path, &password, total_bytes, cipher, profile, label, hidden_opt) {
-            Ok(_) => {
+            Ok(container) => {
+                // Add selected key recipients
+                let mut recipient_errors = vec![];
+                for fp in &selected_recipients {
+                    match self.keys.get_public(fp) {
+                        Some(pub_key) => {
+                            if let Err(e) = container.add_key_recipient(&pub_key) {
+                                recipient_errors.push(format!("{}: {e}", vnmcore::fp_display(fp)));
+                            }
+                        }
+                        None => recipient_errors.push(format!("{}: key not found", vnmcore::fp_display(fp))),
+                    }
+                }
+                container.flush().ok();
+
                 self.recent.add(&container_path, None, Some(cipher_str));
-                self.set_status(format!("Container created: {container_path}"), false);
+
+                if recipient_errors.is_empty() {
+                    let n = selected_recipients.len();
+                    let extra = if n > 0 { format!(" (+{n} recipient(s))") } else { String::new() };
+                    self.set_status(format!("Container created{extra}: {container_path}"), false);
+                } else {
+                    self.set_status(
+                        format!("Container created but some recipients failed: {}", recipient_errors.join("; ")),
+                        true,
+                    );
+                }
                 self.create_view = Default::default();
                 self.screen = Screen::VaultList;
             }

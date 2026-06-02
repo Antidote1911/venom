@@ -73,7 +73,7 @@ impl KeyStore {
         let key = hybrid_generate();
         let fp     = key.fingerprint();
         let fp_hex = fp_display(&fp);
-        let path   = self.dir.join(format!("{fp_hex}.key"));
+        let path   = self.dir.join(format!("{}.key", fp_filename(&fp)));
 
         match passphrase {
             Some(pw) => write_key_file_protected(&path, &key, label, pw, kdf_profile)
@@ -107,7 +107,7 @@ impl KeyStore {
             return Err(format!("Key {fp_hex} is already in the store."));
         }
 
-        let dest = self.dir.join(format!("{fp_hex}.key"));
+        let dest = self.dir.join(format!("{}.key", fp_filename(&fp)));
         std::fs::copy(path, &dest).map_err(|e| format!("copy: {e}"))?;
 
         #[cfg(unix)] {
@@ -129,7 +129,7 @@ impl KeyStore {
 
     /// Export the public key of a given fingerprint as a `.pub` file.
     pub fn export_pub(&self, fp: &[u8; 8], dest: &std::path::Path) -> Result<(), String> {
-        let src = self.dir.join(format!("{}.key", fp_display(fp)));
+        let src = self.dir.join(format!("{}.key", fp_filename(fp)));
         let pub_data = read_key_public(&src).map_err(|e| e.to_string())?;
         let entry = self.entries.iter().find(|e| e.fingerprint == *fp);
         let label = entry.map(|e| e.label.as_str()).unwrap_or("");
@@ -142,7 +142,7 @@ impl KeyStore {
     /// Add or change passphrase on an existing key.
     /// `old_passphrase`: None if key is currently unprotected.
     pub fn protect(&mut self, fp: &[u8; 8], old_passphrase: Option<&[u8]>, new_passphrase: &[u8], kdf_profile: u8) -> Result<(), String> {
-        let path = self.dir.join(format!("{}.key", fp_display(fp)));
+        let path = self.dir.join(format!("{}.key", fp_filename(fp)));
         let kf = match old_passphrase {
             Some(pw) => read_key_file_protected(&path, pw).map_err(|e| e.to_string())?,
             None     => read_key_file(&path).map_err(|e| e.to_string())?,
@@ -157,7 +157,7 @@ impl KeyStore {
 
     /// Remove passphrase protection from a key.
     pub fn unprotect(&mut self, fp: &[u8; 8], passphrase: &[u8]) -> Result<(), String> {
-        let path = self.dir.join(format!("{}.key", fp_display(fp)));
+        let path = self.dir.join(format!("{}.key", fp_filename(fp)));
         let kf = read_key_file_protected(&path, passphrase).map_err(|e| e.to_string())?;
         write_key_file(&path, &kf.key, &kf.label).map_err(|e| e.to_string())?;
         if let Some(e) = self.entries.iter_mut().find(|e| e.fingerprint == *fp) {
@@ -170,19 +170,19 @@ impl KeyStore {
 
     /// Get the public portion (no passphrase needed).
     pub fn get_public(&self, fp: &[u8; 8]) -> Option<HybridPublicKey> {
-        let path = self.dir.join(format!("{}.key", fp_display(fp)));
+        let path = self.dir.join(format!("{}.key", fp_filename(fp)));
         read_key_public(&path).ok().map(|d| d.public)
     }
 
     /// Get the full keypair. Fails if the key is protected (use `get_key_protected`).
     pub fn get_key(&self, fp: &[u8; 8]) -> Option<HybridPrivateKey> {
-        let path = self.dir.join(format!("{}.key", fp_display(fp)));
+        let path = self.dir.join(format!("{}.key", fp_filename(fp)));
         read_key_file(&path).ok().map(|kf| kf.key)
     }
 
     /// Get the full keypair, decrypting with passphrase if needed.
     pub fn get_key_with_passphrase(&self, fp: &[u8; 8], passphrase: &[u8]) -> Result<HybridPrivateKey, String> {
-        let path = self.dir.join(format!("{}.key", fp_display(fp)));
+        let path = self.dir.join(format!("{}.key", fp_filename(fp)));
         read_key_file_protected(&path, passphrase)
             .map(|kf| kf.key)
             .map_err(|e| e.to_string())
@@ -190,12 +190,30 @@ impl KeyStore {
 
     // ── Delete ────────────────────────────────────────────────────────────────
 
-    pub fn remove(&mut self, fp: &[u8; 8]) {
-        let _ = std::fs::remove_file(self.dir.join(format!("{}.key", fp_display(fp))));
+    /// Remove a key. Returns Err if the file could not be deleted.
+    /// Tries both filename formats for backward compatibility
+    /// (new: no-colon hex, old: colon-separated).
+    pub fn remove(&mut self, fp: &[u8; 8]) -> Result<(), String> {
+        let path_new = self.dir.join(format!("{}.key", fp_filename(fp)));
+        let path_old = self.dir.join(format!("{}.key", fp_display(fp)));
+        let deleted  = std::fs::remove_file(&path_new).is_ok()
+                    || std::fs::remove_file(&path_old).is_ok();
+        if !deleted {
+            return Err(format!(
+                "Cannot delete key file. Tried:\n  {}\n  {}",
+                path_new.display(), path_old.display()
+            ));
+        }
         self.entries.retain(|e| e.fingerprint != *fp);
+        Ok(())
     }
 
     pub fn key_dir(&self) -> &std::path::Path { &self.dir }
+}
+
+/// Fingerprint as contiguous hex — used for filenames (no colons).
+fn fp_filename(fp: &[u8; 8]) -> String {
+    fp.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn key_dir() -> PathBuf {

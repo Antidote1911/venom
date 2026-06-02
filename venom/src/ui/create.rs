@@ -6,11 +6,11 @@ use super::theme;
 pub struct CreateView {
     pub container_path:       String,
     pub size_mb:              u64,
-    pub size_input:           String,    // raw text field
+    pub size_input:           String,
     pub password:             String,
     pub password_confirm:     String,
     pub label:                String,
-    pub cipher_index:         usize,     // 0=ChaCha20, 1=AES-256-GCM
+    pub cipher_index:         usize,
     pub high_security:        bool,
     // Hidden volume
     pub hidden_enabled:       bool,
@@ -19,6 +19,8 @@ pub struct CreateView {
     pub hidden_password:      String,
     pub hidden_password_confirm: String,
     pub hidden_label:         String,
+    // Key recipients selected at creation
+    pub selected_recipients:  Vec<[u8; 8]>,
 }
 
 pub fn render(app: &mut VenomApp, ui: &mut egui::Ui) {
@@ -208,6 +210,61 @@ pub fn render(app: &mut VenomApp, ui: &mut egui::Ui) {
                     });
             });
         });
+
+        // ── Key recipients ────────────────────────────────────────────────────
+        if !app.keys.entries.is_empty() {
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("Key recipients  (can open this container with their private key)")
+                    .color(theme::TEXT_MUTED).small().strong(),
+            );
+            ui.add_space(4.0);
+            Frame::none()
+                .fill(egui::Color32::from_rgb(20, 20, 32))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 60, 120)))
+                .rounding(egui::Rounding::same(6.0))
+                .inner_margin(egui::Margin::same(8.0))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    for entry in app.keys.entries.clone().iter() {
+                        let fp  = entry.fingerprint;
+                        let mut checked = app.create_view.selected_recipients.contains(&fp);
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut checked, "").changed() {
+                                if checked {
+                                    app.create_view.selected_recipients.push(fp);
+                                } else {
+                                    app.create_view.selected_recipients.retain(|r| r != &fp);
+                                }
+                            }
+                            ui.label(RichText::new(&entry.label).strong().small());
+                            ui.label(
+                                RichText::new(vnmcore::fp_display(&fp))
+                                    .monospace().small()
+                                    .color(egui::Color32::from_rgb(160, 120, 200)),
+                            );
+                            if entry.is_protected {
+                                ui.label(RichText::new("🔒").small());
+                            }
+                        });
+                    }
+                    if app.create_view.selected_recipients.is_empty() {
+                        ui.label(
+                            RichText::new("No recipient selected — only password access.")
+                                .small().color(theme::TEXT_MUTED).italics(),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} recipient(s) selected — they can open with their .key file.",
+                                app.create_view.selected_recipients.len()
+                            )).small().color(theme::SUCCESS),
+                        );
+                    }
+                });
+        }
 
         ui.add_space(16.0);
         ui.separator();
