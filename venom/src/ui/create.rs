@@ -45,12 +45,21 @@ pub fn render(app: &mut VenomApp, ui: &mut egui::Ui) {
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut app.create_view.container_path)
                             .hint_text("/home/user/secrets.vnm")
-                            .desired_width(ui.available_width() - 64.0));
-                        if ui.button("Save as…").clicked() {
-                            if let Some(p) = rfd::FileDialog::new()
-                                .add_filter("Venom container", &["vnm"])
+                            .desired_width(ui.available_width() - 90.0));
+                        if ui.add(
+                            egui::Button::new(
+                                RichText::new("💾 Save as…").color(egui::Color32::WHITE)
+                            ).fill(theme::BTN_PRIMARY)
+                        ).clicked() {
+                            if let Some(mut p) = rfd::FileDialog::new()
+                                .set_title("Choose container file location")
+                                .add_filter("Venom container (*.vnm)", &["vnm"])
                                 .save_file()
                             {
+                                // Ensure the .vnm extension is present
+                                if p.extension().is_none() {
+                                    p.set_extension("vnm");
+                                }
                                 app.create_view.container_path = p.display().to_string();
                             }
                         }

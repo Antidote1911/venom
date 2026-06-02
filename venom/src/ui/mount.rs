@@ -26,14 +26,20 @@ pub fn render(app: &mut VenomApp, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
             ui.set_width(col);
 
-            ui.label(RichText::new("Container file (.vnm)").color(theme::TEXT_MUTED));
+            ui.label(RichText::new("Container file  (.vnm)").color(theme::TEXT_MUTED));
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut app.mount_view.vault_path)
                     .hint_text("/home/user/secrets.vnm")
-                    .desired_width(ui.available_width() - 64.0));
-                if ui.button("Browse…").clicked() {
+                    .desired_width(ui.available_width() - 90.0));
+                if ui.add(
+                    egui::Button::new(
+                        RichText::new("📄 Open file").color(egui::Color32::WHITE)
+                    ).fill(theme::BTN_PRIMARY)
+                ).clicked() {
                     if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("Venom container", &["vnm"])
+                        .set_title("Select Venom container")
+                        .add_filter("Venom container (*.vnm)", &["vnm"])
+                        .add_filter("All files", &["*"])
                         .pick_file()
                     {
                         app.mount_view.vault_path = p.display().to_string();
@@ -42,13 +48,16 @@ pub fn render(app: &mut VenomApp, ui: &mut egui::Ui) {
             });
             ui.add_space(8.0);
 
-            ui.label(RichText::new("Mountpoint (empty directory)").color(theme::TEXT_MUTED));
+            ui.label(RichText::new("Mountpoint  (empty directory)").color(theme::TEXT_MUTED));
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut app.mount_view.mountpoint)
                     .hint_text("/mnt/vault")
-                    .desired_width(ui.available_width() - 64.0));
-                if ui.button("Browse…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                    .desired_width(ui.available_width() - 90.0));
+                if ui.button("📁 Folder…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .set_title("Select empty mountpoint directory")
+                        .pick_folder()
+                    {
                         app.mount_view.mountpoint = p.display().to_string();
                     }
                 }
