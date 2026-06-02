@@ -159,6 +159,10 @@ pub type VnmErrorCb   = extern "C" fn(*const c_char, *mut c_void);
 pub type VnmGoneCb    = extern "C" fn(*mut c_void);
 
 /// Mount a container — BLOCKS until unmounted. Run from a dedicated thread.
+///
+/// # Ownership
+/// This function takes ownership of `handle` — the caller must NOT call
+/// `vnm_container_free` after this returns.  The handle is freed internally.
 #[no_mangle]
 pub extern "C" fn vnm_mount_blocking(
     handle:     *mut VnmHandle,
@@ -173,20 +177,23 @@ pub extern "C" fn vnm_mount_blocking(
         Ok(s) => s.to_string(), Err(_) => return,
     };
 
-    // Signal "mounted"
+    // Consume the Box — this is the single owner from here on.
+    let owned = unsafe { Box::from_raw(handle) };
+
+    // Signal "mounted" before blocking.
     if let Some(cb) = on_mounted {
-        let h = unsafe { &*handle };
-        cb(h.label_c.as_ptr(), h.cipher_c.as_ptr(),
-           h.container.created_at, h.container.is_hidden, user_data);
+        cb(owned.label_c.as_ptr(), owned.cipher_c.as_ptr(),
+           owned.container.created_at, owned.container.is_hidden, user_data);
     }
+
+    // Destructure to move the container into an Arc without copying.
+    // label_c / cipher_c are dropped here (end of their scope).
+    let VnmHandle { container, .. } = *owned;
 
     #[cfg(target_family = "unix")]
     {
         use vnmcore::fs::fuse::driver;
-        // SAFETY: The handle is exclusively owned by this thread at this point.
-        let container = unsafe {
-            std::sync::Arc::new(std::ptr::read(&(*handle).container))
-        };
+        let container = std::sync::Arc::new(container);
         match driver::mount(container, &mp) {
             Ok(_)  => { if let Some(cb) = on_gone  { cb(user_data); } }
             Err(e) => {
@@ -267,7 +274,7 @@ pub extern "C" fn vnm_key_generate(
 /// Export the public portion of a .key as a .pub file.
 #[no_mangle]
 pub extern "C" fn vnm_key_export_pub(
-    key_path: *const c_char, pub_path: *const c_char, key_passphrase: *const c_char,
+    key_path: *const c_char, pub_path: *const c_char, _key_passphrase: *const c_char,
     error_out: *mut *mut c_char,
 ) -> bool {
     clear_error(error_out);

@@ -1,6 +1,15 @@
+# Rust
 /target/
 **/*.rs.bk
 .env
+
+# Editor
 *.swp
 *.swo
-venom-qt/build/
+
+# Qt/CMake build directories
+venom/build/
+venom/build2/
+
+# Misc
+test.pub

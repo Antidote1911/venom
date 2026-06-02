@@ -1,5 +1,5 @@
 [workspace]
-members = ["vnmcore", "venom", "vnmcore-ffi"]
+members = ["vnmcore", "vnmcore-ffi"]
 resolver = "2"
 
 [workspace.package]
@@ -36,16 +36,8 @@ hmac = "0.12"
 # Async
 tokio = { version = "1", features = ["full"] }
 
-# GUI
-eframe = "0.28"
-egui = "0.28"
-egui_extras = "0.28"
-
 # FUSE (Linux/macOS)
 fuser = "0.14"
-
-# File dialog
-rfd = "0.14"
 
 # Bytes serialization
 serde_bytes = "0.11"
