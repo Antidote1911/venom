@@ -832,4 +832,329 @@ pub mod driver {
         ];
         fuser::mount2(fs, mountpoint, &options).map_err(VnmError::Io)
     }
+
+    // ── Tests ────────────────────────────────────────────────────────────────
+    //
+    // These tests exercise cache logic directly (open_files, dirty flag, flush)
+    // without mounting a real FUSE filesystem. They have access to all private
+    // fields because they live inside the driver module.
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Arc;
+        use crate::container::CipherAlgorithm;
+        use crate::fs::vault::Vault;
+        use crate::storage::{NodeKind, VaultNode};
+        use crate::storage::vault_fs::{DirEntry, FileBlock};
+
+        fn tmp(label: &str) -> std::path::PathBuf {
+            std::env::temp_dir()
+                .join(format!("vnm_fuse_{label}_{}", std::process::id()))
+        }
+
+        /// Create a fresh vault + matching VenomFuse (not mounted).
+        fn setup(label: &str) -> (Arc<Vault>, VenomFuse, std::path::PathBuf) {
+            let path = tmp(label);
+            let _ = std::fs::remove_dir_all(&path);
+            let vault = Arc::new(
+                Vault::create(&path, b"pass", CipherAlgorithm::ChaCha20Poly1305, "interactive", None)
+                    .unwrap(),
+            );
+            let fuse = VenomFuse::new(vault.clone());
+            (vault, fuse, path)
+        }
+
+        /// Write a file block into the vault root directory and allocate its inode.
+        /// Returns (block_id, ino).
+        fn plant_file(vault: &Arc<Vault>, fuse: &mut VenomFuse, name: &str, content: &[u8]) -> (String, u64) {
+            let node = VaultNode::File(FileBlock {
+                kind: NodeKind::File,
+                total_size: content.len() as u64,
+                continuation_ids: vec![],
+                data: content.to_vec(),
+            });
+            let file_id = vault.write_node(&node).unwrap();
+
+            let root_id = vault.root_id().to_string();
+            let mut root = match vault.read_node(&root_id).unwrap() {
+                VaultNode::Directory(d) => d,
+                _ => panic!("root is not a directory"),
+            };
+            root.entries.push(DirEntry {
+                name: name.into(),
+                block_id: file_id.clone(),
+                kind: NodeKind::File,
+            });
+            vault.update_node(&root_id, &VaultNode::Directory(root)).unwrap();
+
+            let ino = fuse.inodes.write().unwrap().get_or_alloc(&file_id);
+            (file_id, ino)
+        }
+
+        /// Read file data straight from disk (bypasses cache).
+        fn disk_data(vault: &Arc<Vault>, file_id: &str) -> Vec<u8> {
+            match vault.read_node(file_id).unwrap() {
+                VaultNode::File(f) => {
+                    let mut data = f.data.clone();
+                    for cid in &f.continuation_ids {
+                        if let Ok(VaultNode::File(c)) = vault.read_node(cid) {
+                            data.extend_from_slice(&c.data);
+                        }
+                    }
+                    data.truncate(f.total_size as usize);
+                    data
+                }
+                _ => panic!("not a file"),
+            }
+        }
+
+        // ── 1. cache_open stores data and marks clean ─────────────────────
+
+        #[test]
+        fn cache_open_populates_entry() {
+            let (vault, mut fuse, path) = setup("open_entry");
+            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"hello");
+
+            let fh = fuse.cache_open(ino, file_id.clone(), b"hello".to_vec());
+
+            let of = fuse.open_files.get(&fh).unwrap();
+            assert_eq!(of.data, b"hello");
+            assert_eq!(of.ino, ino);
+            assert_eq!(of.block_id, file_id);
+            assert!(!of.dirty, "freshly opened file must not be dirty");
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 2. writing to cache marks dirty without touching disk ─────────
+
+        #[test]
+        fn write_marks_dirty_no_disk_change() {
+            let (vault, mut fuse, path) = setup("write_dirty");
+            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"original");
+
+            let fh = fuse.cache_open(ino, file_id.clone(), b"original".to_vec());
+            {
+                let of = fuse.open_files.get_mut(&fh).unwrap();
+                of.data = b"modified".to_vec();
+                of.dirty = true;
+            }
+
+            assert!(fuse.open_files[&fh].dirty);
+            // Disk must still have original data
+            assert_eq!(disk_data(&vault, &file_id), b"original");
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 3. flush writes dirty data to disk and clears dirty flag ─────
+
+        #[test]
+        fn flush_persists_and_clears_dirty() {
+            let (vault, mut fuse, path) = setup("flush_persist");
+            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"v1");
+
+            let fh = fuse.cache_open(ino, file_id.clone(), b"v2 persisted".to_vec());
+            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
+
+            fuse.flush_fh(fh).unwrap();
+
+            assert!(!fuse.open_files[&fh].dirty, "dirty must be cleared after flush");
+            assert_eq!(disk_data(&vault, &file_id), b"v2 persisted");
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 4. flushing a clean file is a no-op ──────────────────────────
+
+        #[test]
+        fn flush_noop_when_clean() {
+            let (vault, mut fuse, path) = setup("flush_noop");
+            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"data");
+
+            let fh = fuse.cache_open(ino, file_id.clone(), b"data".to_vec());
+            // dirty = false (default)
+            fuse.flush_fh(fh).unwrap();
+
+            // On-disk content unchanged
+            assert_eq!(disk_data(&vault, &file_id), b"data");
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 5. release flushes then evicts ────────────────────────────────
+
+        #[test]
+        fn release_flushes_then_evicts() {
+            let (vault, mut fuse, path) = setup("release");
+            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"before");
+
+            let fh = fuse.cache_open(ino, file_id.clone(), b"after".to_vec());
+            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
+
+            fuse.flush_fh(fh).unwrap();
+            fuse.open_files.remove(&fh);
+
+            assert!(!fuse.open_files.contains_key(&fh), "entry must be evicted");
+            assert_eq!(disk_data(&vault, &file_id), b"after");
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 6. cached_size_for_ino returns correct live size ──────────────
+
+        #[test]
+        fn cached_size_reflects_dirty_buffer() {
+            let (vault, mut fuse, path) = setup("cached_size");
+            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"abc");
+
+            assert_eq!(fuse.cached_size_for_ino(ino), None, "no handle open yet");
+
+            let fh = fuse.cache_open(ino, file_id, b"much longer content here".to_vec());
+            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
+
+            assert_eq!(fuse.cached_size_for_ino(ino), Some(24));
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 7. drop flushes all dirty files ──────────────────────────────
+
+        #[test]
+        fn drop_flushes_dirty_files() {
+            let (vault, path) = {
+                let p = tmp("drop_flush");
+                let _ = std::fs::remove_dir_all(&p);
+                let v = Arc::new(
+                    Vault::create(&p, b"pass", CipherAlgorithm::ChaCha20Poly1305, "interactive", None).unwrap(),
+                );
+                (v, p)
+            };
+            let file_id = {
+                let mut fuse = VenomFuse::new(vault.clone());
+                let (fid, ino) = plant_file(&vault, &mut fuse, "f.txt", b"init");
+                let fh = fuse.cache_open(ino, fid.clone(), b"flushed by drop".to_vec());
+                fuse.open_files.get_mut(&fh).unwrap().dirty = true;
+                fid
+                // fuse dropped here → flush_all()
+            };
+
+            assert_eq!(disk_data(&vault, &file_id), b"flushed by drop");
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 8. multiple flush cycles (continuation-block rotation) ────────
+
+        #[test]
+        fn multiple_flush_cycles() {
+            let (vault, mut fuse, path) = setup("multi_flush");
+            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"v1");
+
+            let fh = fuse.cache_open(ino, file_id.clone(), b"version 2".to_vec());
+            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
+            fuse.flush_fh(fh).unwrap();
+            assert_eq!(disk_data(&vault, &file_id), b"version 2");
+
+            // Second write + flush
+            fuse.open_files.get_mut(&fh).unwrap().data = b"version 3".to_vec();
+            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
+            fuse.flush_fh(fh).unwrap();
+            assert_eq!(disk_data(&vault, &file_id), b"version 3");
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 9. unlink evicts matching entries without flushing ────────────
+
+        #[test]
+        fn unlink_evicts_without_flushing() {
+            let (vault, mut fuse, path) = setup("unlink_evict");
+            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"disk-content");
+
+            let fh = fuse.cache_open(ino, file_id.clone(), b"NOT-to-be-flushed".to_vec());
+            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
+
+            // Evict without flush (as unlink does)
+            fuse.open_files.retain(|_, of| of.block_id != file_id);
+
+            assert!(!fuse.open_files.contains_key(&fh));
+            // Disk must keep original content (no flush happened)
+            assert_eq!(disk_data(&vault, &file_id), b"disk-content");
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 10. two handles to the same file: last flush wins ─────────────
+
+        #[test]
+        fn two_fhs_last_flush_wins() {
+            let (vault, mut fuse, path) = setup("two_fhs");
+            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"base");
+
+            let fh1 = fuse.cache_open(ino, file_id.clone(), b"from-fh1".to_vec());
+            let fh2 = fuse.cache_open(ino, file_id.clone(), b"from-fh2".to_vec());
+            fuse.open_files.get_mut(&fh1).unwrap().dirty = true;
+            fuse.open_files.get_mut(&fh2).unwrap().dirty = true;
+
+            fuse.flush_fh(fh1).unwrap();
+            assert_eq!(disk_data(&vault, &file_id), b"from-fh1");
+
+            fuse.flush_fh(fh2).unwrap();
+            assert_eq!(disk_data(&vault, &file_id), b"from-fh2");
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 11. setattr truncate updates cache when file is open ──────────
+
+        #[test]
+        fn setattr_truncate_updates_cache() {
+            let (vault, mut fuse, path) = setup("setattr_trunc");
+            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"hello world");
+
+            let fh = fuse.cache_open(ino, file_id.clone(), b"hello world".to_vec());
+
+            // Simulate setattr with size: resize cache to 5
+            let of = fuse.open_files.get_mut(&fh).unwrap();
+            of.data.resize(5, 0);
+            of.dirty = true;
+
+            assert_eq!(fuse.open_files[&fh].data, b"hello");
+            assert_eq!(fuse.cached_size_for_ino(ino), Some(5));
+
+            // Flush and verify on disk
+            fuse.flush_fh(fh).unwrap();
+            assert_eq!(disk_data(&vault, &file_id), b"hello");
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+
+        // ── 12. alloc_fh never returns 0, increments monotonically ────────
+
+        #[test]
+        fn alloc_fh_monotonic_nonzero() {
+            let (vault, path) = {
+                let p = tmp("alloc_fh");
+                let _ = std::fs::remove_dir_all(&p);
+                let v = Arc::new(
+                    Vault::create(&p, b"pass", CipherAlgorithm::ChaCha20Poly1305, "interactive", None).unwrap(),
+                );
+                (v, p)
+            };
+            let mut fuse = VenomFuse::new(vault);
+            let fhs: Vec<u64> = (0..10).map(|_| fuse.alloc_fh()).collect();
+
+            for &fh in &fhs {
+                assert_ne!(fh, 0, "fh must never be 0");
+            }
+            // Monotonically increasing
+            for w in fhs.windows(2) {
+                assert!(w[1] > w[0]);
+            }
+
+            std::fs::remove_dir_all(&path).ok();
+        }
+    }
 }
