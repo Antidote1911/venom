@@ -1,9 +1,17 @@
 //! High-level container API.
 //!
-//! A VnmContainer wraps a SlotStore and exposes typed read/write operations
-//! on VaultNodes (directory/file blocks). It handles both outer and hidden
-//! volumes transparently — the caller just provides a password and gets the
-//! correct volume.
+//! ## File layout (version 2)
+//!
+//!   [0..512]                      Outer header
+//!   [512..1024]                   Random reserved bytes (no header here)
+//!   [1024 .. 1024+outer*32768]    Outer slots  [0..outer_slots)
+//!   [1024+outer*32768 .. end-512] Hidden slots [outer_slots..outer+hidden) — absent if no hidden
+//!   [end-512 .. end]              Hidden header (or random bytes if no hidden volume)
+//!
+//! Key deniability property: the outer header claims `total_slots = outer_slots`
+//! (the outer volume appears to own the full container).  The extra space at the
+//! end (hidden volume + its header) is indistinguishable from slack space to an
+//! attacker who only has the outer password.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,47 +21,45 @@ use rand::RngCore;
 
 use crate::{Result, VnmError};
 use crate::container::{
-    CipherAlgorithm, HeaderPayload, KdfParams, HEADER_REGION_SIZE, SLOT_SIZE,
+    CipherAlgorithm, HeaderPayload, HEADER_REGION_SIZE, SLOT_SIZE,
     encode_header_with_password, decode_header,
-    OUTER_HEADER_OFFSET, HIDDEN_HEADER_OFFSET,
+    kdf_params_for_profile, profile_id_for_str,
 };
 use crate::storage::{SlotStore, VaultNode, NodeKind};
 use crate::storage::vault_fs::DirectoryBlock;
 
-const OUTER_ALLOC_SLOT:  u64 = 0;  // slot 0 = outer allocation block
+const OUTER_ALLOC_SLOT: u64 = 0;
 
-/// Minimum usable container size in bytes.
-pub const MIN_SIZE: u64 = HEADER_REGION_SIZE + 16 * SLOT_SIZE as u64; // ≥ 16 slots
+/// Minimum container size: header region + at least 16 outer slots.
+pub const MIN_SIZE: u64 = HEADER_REGION_SIZE + 16 * SLOT_SIZE as u64;
 
-/// Options for creating the hidden volume.
+/// Byte offset of the outer header in the file.
+const OUTER_HEADER_OFFSET: u64 = 0;
+
+/// Options for the hidden volume.
 pub struct HiddenVolumeOptions<'a> {
-    pub password: &'a [u8],
-    pub size_bytes: u64,
-    pub label: Option<String>,
+    pub password:    &'a [u8],
+    pub size_bytes:  u64,
+    pub label:       Option<String>,
     pub kdf_profile: &'a str,
 }
 
 /// A mounted Venom container (outer or hidden volume).
 pub struct VnmContainer {
-    pub store: SlotStore,
-    pub root_slot: u64,
-    pub is_hidden: bool,
-    pub cipher: CipherAlgorithm,
-    pub total_slots: u64,
-    pub outer_limit: u64,
-    pub label: Option<String>,
+    pub store:      SlotStore,
+    pub root_slot:  u64,
+    pub is_hidden:  bool,
+    pub cipher:     CipherAlgorithm,
+    pub total_slots: u64,   // outer: outer-only count; hidden: hidden count
+    pub outer_limit: u64,   // first slot index that belongs to the hidden area
+    pub label:      Option<String>,
     pub created_at: u64,
-    path: PathBuf,
+    path:           PathBuf,
 }
 
 impl VnmContainer {
     // ── Create ────────────────────────────────────────────────────────────────
 
-    /// Create a new container file.
-    ///
-    /// `outer_size_bytes` includes both the outer and hidden volumes.
-    /// If `hidden` is provided, the hidden volume occupies the tail of the file
-    /// and the outer volume is constrained to the remaining slots.
     pub fn create(
         path: impl AsRef<Path>,
         outer_password: &[u8],
@@ -64,7 +70,6 @@ impl VnmContainer {
         hidden: Option<HiddenVolumeOptions<'_>>,
     ) -> Result<Self> {
         let path = path.as_ref();
-
         if path.exists() {
             return Err(VnmError::ContainerAlreadyExists(path.display().to_string()));
         }
@@ -72,156 +77,113 @@ impl VnmContainer {
             return Err(VnmError::SizeTooSmall(MIN_SIZE));
         }
 
-        let total_slots = (total_size_bytes - HEADER_REGION_SIZE) / SLOT_SIZE as u64;
+        // File layout:
+        //   HEADER_REGION_SIZE bytes  (outer header + reserved)
+        //   outer_slots * SLOT_SIZE   bytes
+        //   [hidden_slots * SLOT_SIZE bytes] — only if hidden volume
+        //   512 bytes                  — hidden header slot (random if no hidden)
+        let usable = total_size_bytes.saturating_sub(HEADER_REGION_SIZE + 512);
+        let total_data_slots = usable / SLOT_SIZE as u64;
 
-        // Determine outer and hidden slot boundaries.
-        let (outer_limit, _hidden_slots) = match &hidden {
-            None => (total_slots, 0u64),
+        let (outer_slots, hidden_slots) = match &hidden {
+            None => (total_data_slots, 0u64),
             Some(h) => {
-                let h_slots = ((h.size_bytes + SLOT_SIZE as u64 - 1) / SLOT_SIZE as u64)
-                    .max(2); // at least 2 hidden slots (alloc + root)
-                let o_limit = total_slots.saturating_sub(h_slots);
-                if o_limit < 2 {
-                    return Err(VnmError::SizeTooSmall(MIN_SIZE));
-                }
-                (o_limit, h_slots)
+                let h_slots = ((h.size_bytes + SLOT_SIZE as u64 - 1) / SLOT_SIZE as u64).max(2);
+                let o_slots = total_data_slots.saturating_sub(h_slots);
+                if o_slots < 2 { return Err(VnmError::SizeTooSmall(MIN_SIZE)); }
+                (o_slots, h_slots)
             }
         };
 
-        // ── Create the file pre-filled with random bytes (required for deniability)
+        // Physical file size
+        let file_size = HEADER_REGION_SIZE
+            + (outer_slots + hidden_slots) * SLOT_SIZE as u64
+            + 512; // hidden header / random tail
+
+        // 1. Create file and fill entirely with random bytes (deniability requirement).
         {
             let f = std::fs::File::create(path)?;
-            f.set_len(total_size_bytes)?;
+            f.set_len(file_size)?;
         }
-        // Fill with random bytes in chunks
         {
+            use std::io::Write;
             let mut f = OpenOptions::new().write(true).open(path)?;
-            let mut rng = rand::thread_rng();
+            let mut rng  = rand::thread_rng();
             let mut chunk = vec![0u8; SLOT_SIZE];
-            let total_fill = HEADER_REGION_SIZE + total_slots * SLOT_SIZE as u64;
             let mut written = 0u64;
-            while written < total_fill {
+            while written < file_size {
                 rng.fill_bytes(&mut chunk);
-                let to_write = ((total_fill - written) as usize).min(chunk.len());
-                use std::io::Write;
-                f.write_all(&chunk[..to_write])?;
-                written += to_write as u64;
+                let n = ((file_size - written) as usize).min(chunk.len());
+                f.write_all(&chunk[..n])?;
+                written += n as u64;
             }
         }
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now          = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let outer_kdf_id = profile_id_for_str(kdf_profile);
+        let outer_key    = new_master_key();
 
-        // ── Derive outer master key
-        let outer_kdf = kdf_params(kdf_profile);
-        let outer_master_key = new_master_key();
-
-        // ── Write hidden header (if requested)
+        // 2. Write hidden header at end of file (before writing outer header).
         if let Some(ref h) = hidden {
-            let hidden_kdf = kdf_params(h.kdf_profile);
-            let hidden_master_key = new_master_key();
-            let hidden_start = outer_limit; // first hidden slot
-            let hidden_alloc = total_slots - 1; // last slot = hidden alloc block
+            let hidden_kdf_id = profile_id_for_str(h.kdf_profile);
+            let hidden_key    = new_master_key();
+            let hidden_start  = outer_slots;
+            let hidden_alloc  = hidden_start + hidden_slots - 1; // last hidden slot = alloc bitmap
 
-            let mut hidden_label = [0u8; 64];
-            if let Some(ref lbl) = h.label {
-                let b = lbl.as_bytes();
-                hidden_label[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
+            let mut lbl = [0u8; 64];
+            if let Some(ref s) = h.label {
+                let b = s.as_bytes(); lbl[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
             }
 
             let hidden_payload = HeaderPayload {
-                master_key:  hidden_master_key,
-                total_slots,
-                outer_limit: hidden_start,  // hidden: stores where hidden slots start
-                root_slot:   hidden_start + 1, // root is second hidden slot (first = alloc)
-                created_at:  now,
-                label:       hidden_label,
+                master_key:   hidden_key,
+                total_slots:  hidden_slots,
+                hidden_start,
+                root_slot:    hidden_start + 1,
+                created_at:   now,
+                label:        lbl,
                 cipher,
-                kdf:         hidden_kdf.clone(),
+                kdf_profile:  hidden_kdf_id,
             };
             let hidden_hdr = encode_header_with_password(&hidden_payload, h.password, true)?;
+            write_at(path, file_size - 512, &hidden_hdr)?;
 
-            // Write hidden header to disk
-            {
-                use std::io::{Write, Seek, SeekFrom};
-                let mut f = OpenOptions::new().write(true).open(path)?;
-                f.seek(SeekFrom::Start(HIDDEN_HEADER_OFFSET))?;
-                f.write_all(&hidden_hdr)?;
-            }
-
-            // Initialize hidden volume's alloc block and root directory
-            let hidden_store = open_slot_store(
-                path,
-                hidden_master_key,
-                cipher,
-                hidden_start,
-                total_slots,
-                hidden_alloc,
-            )?;
+            // Initialise hidden slot store
+            let hidden_store = open_slot_store(path, hidden_key, cipher,
+                hidden_start, hidden_start + hidden_slots, hidden_alloc)?;
             hidden_store.rebuild_free_list();
-            // Remove root slot from free list (it will be written next)
             {
                 let mut free = hidden_store.free.lock().unwrap();
-                free.retain(|&s| s != hidden_start + 1);
+                free.retain(|&s| s != hidden_start + 1); // root slot reserved
             }
-            // Write empty root directory
-            let root_dir = VaultNode::Directory(DirectoryBlock {
-                kind: NodeKind::Directory,
-                entries: vec![],
-            });
-            let payload = rmp_serde::to_vec_named(&root_dir)
-                .map_err(|e| VnmError::Serialization(e.to_string()))?;
-            hidden_store.write(hidden_start + 1, &payload)?;
+            write_empty_root_dir(&hidden_store, hidden_start + 1)?;
             hidden_store.save_free_list()?;
         }
 
-        // ── Write outer header
-        let mut outer_label = [0u8; 64];
-        if let Some(ref lbl) = label {
-            let b = lbl.as_bytes();
-            outer_label[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
+        // 3. Write outer header at offset 0.
+        let mut outer_lbl = [0u8; 64];
+        if let Some(ref s) = label {
+            let b = s.as_bytes(); outer_lbl[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
         }
-
         let outer_payload = HeaderPayload {
-            master_key:  outer_master_key,
-            total_slots,
-            outer_limit,
-            root_slot:   1, // slot 0 = alloc, slot 1 = root dir
-            created_at:  now,
-            label:       outer_label,
+            master_key:   outer_key,
+            total_slots:  outer_slots,  // outer volume claims only its own slots
+            hidden_start: 0,
+            root_slot:    1,
+            created_at:   now,
+            label:        outer_lbl,
             cipher,
-            kdf:         outer_kdf,
+            kdf_profile:  outer_kdf_id,
         };
         let outer_hdr = encode_header_with_password(&outer_payload, outer_password, false)?;
-        {
-            use std::io::{Write, Seek, SeekFrom};
-            let mut f = OpenOptions::new().write(true).open(path)?;
-            f.seek(SeekFrom::Start(OUTER_HEADER_OFFSET))?;
-            f.write_all(&outer_hdr)?;
-        }
+        write_at(path, OUTER_HEADER_OFFSET, &outer_hdr)?;
 
-        // ── Initialize outer slot store
-        let outer_store = open_slot_store(
-            path,
-            outer_master_key,
-            cipher,
-            0,
-            outer_limit,
-            OUTER_ALLOC_SLOT,
-        )?;
-        // All slots free except alloc (0) and root (1).
+        // 4. Initialise outer slot store.
+        let outer_store = open_slot_store(path, outer_key, cipher,
+            0, outer_slots, OUTER_ALLOC_SLOT)?;
         outer_store.rebuild_free_list();
-        {
-            let mut free = outer_store.free.lock().unwrap();
-            free.retain(|&s| s != 1); // root will be written below
-        }
-        // Write empty root directory to slot 1
-        let root_dir = VaultNode::Directory(DirectoryBlock {
-            kind: NodeKind::Directory,
-            entries: vec![],
-        });
-        let payload = rmp_serde::to_vec_named(&root_dir)
-            .map_err(|e| VnmError::Serialization(e.to_string()))?;
-        outer_store.write(1, &payload)?;
+        { outer_store.free.lock().unwrap().retain(|&s| s != 1); }
+        write_empty_root_dir(&outer_store, 1)?;
         outer_store.save_free_list()?;
 
         Ok(VnmContainer {
@@ -229,8 +191,8 @@ impl VnmContainer {
             root_slot:   1,
             is_hidden:   false,
             cipher,
-            total_slots,
-            outer_limit,
+            total_slots: outer_slots,
+            outer_limit: outer_slots,
             label,
             created_at:  now,
             path:        path.to_path_buf(),
@@ -239,78 +201,61 @@ impl VnmContainer {
 
     // ── Open ──────────────────────────────────────────────────────────────────
 
-    /// Open an existing container. Automatically detects outer vs hidden volume
-    /// by trying both headers in sequence.
+    /// Open an existing container.  Tries the outer header first (offset 0),
+    /// then the hidden header (file_end − 512).  Returns whichever volume the
+    /// password decrypts.
     pub fn open(path: impl AsRef<Path>, password: &[u8]) -> Result<Self> {
-        let path = path.as_ref();
-
+        let path      = path.as_ref();
         if !path.exists() {
             return Err(VnmError::ContainerNotFound(path.display().to_string()));
         }
-
         let file_size = std::fs::metadata(path)?.len();
-        let total_slots = (file_size.saturating_sub(HEADER_REGION_SIZE)) / SLOT_SIZE as u64;
 
-        // Read both 512-byte headers
-        let (outer_raw, hidden_raw) = {
-            use std::io::{Read, Seek, SeekFrom};
-            let mut f = std::fs::File::open(path)?;
-            let mut outer_raw = [0u8; 512];
-            let mut hidden_raw = [0u8; 512];
-            f.seek(SeekFrom::Start(OUTER_HEADER_OFFSET))?;
-            f.read_exact(&mut outer_raw)?;
-            f.seek(SeekFrom::Start(HIDDEN_HEADER_OFFSET))?;
-            f.read_exact(&mut hidden_raw)?;
-            (outer_raw, hidden_raw)
+        // Read outer header (512 bytes at offset 0)
+        let outer_raw = read_at(path, OUTER_HEADER_OFFSET)?;
+        // Read hidden header (512 bytes at file_end - 512)
+        let hidden_raw = if file_size >= 512 {
+            read_at(path, file_size - 512).unwrap_or([0u8; 512])
+        } else {
+            [0u8; 512]
         };
 
-        // Try outer header first
-        if let Ok(payload) = decode_header(&outer_raw, password, false) {
-            let store = open_slot_store(
-                path,
-                payload.master_key,
-                payload.cipher,
-                0,
-                payload.outer_limit,
-                OUTER_ALLOC_SLOT,
-            )?;
+        // Try outer header
+        if let Ok(p) = decode_header(&outer_raw, password, false) {
+            let outer_limit = p.total_slots;
+            let store = open_slot_store(path, p.master_key, p.cipher,
+                0, outer_limit, OUTER_ALLOC_SLOT)?;
             store.load_free_list()?;
-            let label = label_from_bytes(&payload.label);
             return Ok(VnmContainer {
-                root_slot:   payload.root_slot,
+                root_slot:   p.root_slot,
                 is_hidden:   false,
-                cipher:      payload.cipher,
-                total_slots: payload.total_slots,
-                outer_limit: payload.outer_limit,
-                label,
-                created_at:  payload.created_at,
+                cipher:      p.cipher,
+                total_slots: p.total_slots,
+                outer_limit,
+                label:       label_from(p.label),
+                created_at:  p.created_at,
                 store,
                 path:        path.to_path_buf(),
             });
         }
 
         // Try hidden header
-        if let Ok(payload) = decode_header(&hidden_raw, password, true) {
-            let hidden_start = payload.outer_limit;
-            let hidden_alloc = total_slots - 1;
-            let store = open_slot_store(
-                path,
-                payload.master_key,
-                payload.cipher,
-                hidden_start,
-                total_slots,
-                hidden_alloc,
-            )?;
+        if let Ok(p) = decode_header(&hidden_raw, password, true) {
+            let hidden_start = p.hidden_start;
+            let hidden_end   = hidden_start + p.total_slots;
+            let hidden_alloc = hidden_end - 1; // last hidden slot = alloc bitmap
+            let store = open_slot_store(path, p.master_key, p.cipher,
+                hidden_start, hidden_end, hidden_alloc)?;
             store.load_free_list()?;
-            let label = label_from_bytes(&payload.label);
+            // outer_limit = hidden_start (outer area boundary, used for statfs)
             return Ok(VnmContainer {
-                root_slot:   payload.root_slot,
+                root_slot:   p.root_slot,
                 is_hidden:   true,
-                cipher:      payload.cipher,
-                total_slots: payload.total_slots,
-                outer_limit: payload.outer_limit,
-                label,
-                created_at:  payload.created_at,
+                cipher:      p.cipher,
+                total_slots: p.total_slots,
+                outer_limit: hidden_start,
+                label:       label_from(p.label),
+                created_at:  p.created_at,
                 store,
                 path:        path.to_path_buf(),
             });
@@ -328,7 +273,7 @@ impl VnmContainer {
     }
 
     pub fn write_node(&self, node: &VaultNode) -> Result<u64> {
-        let slot = self.store.alloc()?;
+        let slot    = self.store.alloc()?;
         let payload = rmp_serde::to_vec_named(node)
             .map_err(|e| VnmError::Serialization(e.to_string()))?;
         self.store.write(slot, &payload)?;
@@ -345,11 +290,9 @@ impl VnmContainer {
         self.store.free_slot(slot);
     }
 
-    pub fn root_slot(&self) -> u64 { self.root_slot }
+    pub fn root_slot(&self)  -> u64  { self.root_slot }
+    pub fn path(&self)       -> &Path { &self.path }
 
-    pub fn path(&self) -> &Path { &self.path }
-
-    /// Flush the free list and file buffers to disk.
     pub fn flush(&self) -> Result<()> {
         self.store.save_free_list()?;
         self.store.flush_file()
@@ -359,35 +302,44 @@ impl VnmContainer {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn new_master_key() -> [u8; 32] {
-    let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
-    key
-}
-
-fn kdf_params(profile: &str) -> KdfParams {
-    match profile {
-        "sensitive" => KdfParams::sensitive(),
-        _           => KdfParams::interactive(),
-    }
+    let mut k = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut k);
+    k
 }
 
 fn open_slot_store(
-    path: &Path,
-    master_key: [u8; 32],
-    cipher: CipherAlgorithm,
-    slot_start: u64,
-    slot_limit: u64,
-    alloc_slot: u64,
+    path: &Path, key: [u8; 32], cipher: CipherAlgorithm,
+    slot_start: u64, slot_limit: u64, alloc_slot: u64,
 ) -> Result<SlotStore> {
     let file = OpenOptions::new().read(true).write(true).open(path)?;
-    Ok(SlotStore::new(file, master_key, cipher, slot_start, slot_limit, alloc_slot))
+    Ok(SlotStore::new(file, key, cipher, slot_start, slot_limit, alloc_slot))
 }
 
-fn label_from_bytes(raw: &[u8; 64]) -> Option<String> {
+fn write_at(path: &Path, offset: u64, data: &[u8]) -> Result<()> {
+    use std::io::{Write, Seek, SeekFrom};
+    let mut f = OpenOptions::new().write(true).open(path)?;
+    f.seek(SeekFrom::Start(offset))?;
+    f.write_all(data)?;
+    Ok(())
+}
+
+fn read_at(path: &Path, offset: u64) -> Result<[u8; 512]> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    f.seek(SeekFrom::Start(offset))?;
+    let mut buf = [0u8; 512];
+    f.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+fn write_empty_root_dir(store: &SlotStore, slot: u64) -> Result<()> {
+    let root = VaultNode::Directory(DirectoryBlock { kind: NodeKind::Directory, entries: vec![] });
+    let data = rmp_serde::to_vec_named(&root)
+        .map_err(|e| VnmError::Serialization(e.to_string()))?;
+    store.write(slot, &data)
+}
+
+fn label_from(raw: [u8; 64]) -> Option<String> {
     let end = raw.iter().position(|&b| b == 0).unwrap_or(64);
-    if end == 0 {
-        None
-    } else {
-        String::from_utf8(raw[..end].to_vec()).ok()
-    }
+    if end == 0 { None } else { String::from_utf8(raw[..end].to_vec()).ok() }
 }

@@ -2,8 +2,8 @@ mod header;
 
 pub use header::{
     HeaderPayload, HEADER_SIZE, HEADER_REGION_SIZE, SLOT_SIZE,
-    OUTER_HEADER_OFFSET, HIDDEN_HEADER_OFFSET,
     encode_header_with_password, decode_header,
+    kdf_params_for_profile, profile_id_for_str,
 };
 
 use serde::{Deserialize, Serialize};
