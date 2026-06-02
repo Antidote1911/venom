@@ -327,7 +327,7 @@ fn open_in_file_manager(path: &str) -> Result<String, String> {
 impl VenomApp {
     /// Open the recipient management screen for a mounted vault.
     pub fn action_open_recipients(&mut self, vault_path: String, mountpoint: String) {
-        use vnmcore::{VnmContainer, OpenCredential};
+        
         // List recipients (needs to open the container with known credentials)
         // For display we just read the plaintext slot counts without decrypting.
         // We can't add/remove without K_master, but we can show the list.
@@ -339,8 +339,7 @@ impl VenomApp {
         self.screen = crate::app::state::Screen::Recipients;
     }
 
-    /// Load recipient list from a container opened with K_master (requires the container to be
-    /// accessible). For now, we open with a stored credential (future: use K_master from mount).
+    #[allow(dead_code)]
     pub fn action_load_recipients(&mut self, password: Vec<u8>) {
         use vnmcore::{VnmContainer, OpenCredential};
         let path = self.recipient_view.container_path.clone();
@@ -358,7 +357,7 @@ impl VenomApp {
 
     /// Generate a new ML-KEM-1024 keypair and save to .vpub / .vpriv files.
     pub fn action_generate_keypair(&mut self) {
-        use std::io::Write;
+        
         let base = self.recipient_view.keygen_path.trim().to_string();
         if base.is_empty() { self.set_status("Choose a file path first.", true); return; }
 
@@ -398,7 +397,7 @@ impl VenomApp {
     /// Add an ML-KEM recipient using a .vpub file.
     pub fn action_add_key_recipient(&mut self) {
         let pubkey_path = self.recipient_view.new_pubkey_path.clone();
-        let container_path = self.recipient_view.container_path.clone();
+        let _container_path = self.recipient_view.container_path.clone();
 
         match std::fs::read(&pubkey_path) {
             Ok(bytes) => {
@@ -410,7 +409,7 @@ impl VenomApp {
                     );
                     return;
                 }
-                let ek: vnmcore::KemEncapKey = bytes.try_into().unwrap();
+                let _ek: vnmcore::KemEncapKey = bytes.try_into().unwrap();
                 // TODO: get K_master from active mount. Currently requires re-open.
                 self.set_status(
                     format!("Public key loaded from {pubkey_path}. \

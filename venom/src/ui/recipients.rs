@@ -26,7 +26,7 @@ pub fn render(app: &mut VenomApp, ui: &mut egui::Ui) {
     if app.recipient_view.recipients.is_empty() {
         ui.label(RichText::new("No recipients loaded.").color(theme::TEXT_MUTED).italics().small());
     } else {
-        for (i, r) in app.recipient_view.recipients.iter().enumerate() {
+        for (_i, r) in app.recipient_view.recipients.iter().enumerate() {
             Frame::none()
                 .fill(theme::CARD)
                 .stroke(egui::Stroke::new(1.0, theme::BORDER))

@@ -39,14 +39,14 @@ pub fn generate() -> (Seed, EncapKey) {
 
 /// Reconstruct the public encapsulation key from a 64-byte seed.
 pub fn ek_from_seed(seed: &Seed) -> EncapKey {
-    let ml_seed = MlSeed::clone_from_slice(seed.as_ref());
+    let ml_seed = MlSeed::from(*seed);
     let dk = DecapsulationKey1024::from_seed(ml_seed);
     dk.encapsulation_key().to_bytes().as_slice().try_into().expect("ek 1568B")
 }
 
 /// Encapsulate: produce (ciphertext, shared_secret) for the recipient holding `ek`.
 pub fn encapsulate(ek_bytes: &EncapKey) -> Result<(KemCiphertext, SharedSecret)> {
-    let key_arr = ml_kem::kem::Key::<EncapsulationKey1024>::clone_from_slice(ek_bytes.as_ref());
+    let key_arr = (*ek_bytes).into();
     let ek = EncapsulationKey1024::new(&key_arr)
         .map_err(|_| VnmError::CipherError("invalid ML-KEM public key".into()))?;
     let (ct, ss) = ek.encapsulate();
@@ -59,9 +59,9 @@ pub fn encapsulate(ek_bytes: &EncapKey) -> Result<(KemCiphertext, SharedSecret)>
 
 /// Decapsulate: recover the shared secret from seed + ciphertext.
 pub fn decapsulate(seed: &Seed, ct_bytes: &KemCiphertext) -> Result<SharedSecret> {
-    let ml_seed = MlSeed::clone_from_slice(seed.as_ref());
+    let ml_seed = MlSeed::from(*seed);
     let dk = DecapsulationKey1024::from_seed(ml_seed);
-    let ct_arr = ml_kem::kem::Ciphertext::<MlKem1024>::clone_from_slice(ct_bytes.as_ref());
+    let ct_arr = ml_kem::kem::Ciphertext::<MlKem1024>::from(*ct_bytes);
     let ss = dk.decapsulate(&ct_arr);
     <[u8; SS_SIZE]>::try_from(ss.as_ref())
         .map_err(|_| VnmError::CipherError("SS size mismatch".into()))

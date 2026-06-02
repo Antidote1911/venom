@@ -41,11 +41,10 @@
 //!   DATA_AREA_OFFSET = 1024 + RECIPIENT_AREA_SIZE         first data slot
 
 use rand::RngCore;
-use zeroize::Zeroize;
 
 use crate::{Result, VnmError};
 use crate::container::{CipherAlgorithm, kdf_params_for_profile};
-use crate::crypto::{derive_key, encrypt_block, decrypt_block};
+use crate::crypto::{encrypt_block, decrypt_block};
 
 pub const HEADER_SIZE:        usize = 512;
 pub const HEADER_REGION_SIZE: u64   = 1024;
@@ -68,12 +67,6 @@ pub const FORMAT_VERSION: u32      = 1;
 
 const SALT_LEN:     usize = 64;
 const BODY_OFFSET:  usize = 68;   // after salt(64) + cipher(1) + profile(1) + n_pw(1) + n_key(1) = 68
-const BODY_PLAINTEXT: usize = 396; // = 512 - 68 - 36 (VNMB) = 408? let me recount
-
-// encrypt_block output = 4(magic)+4(ver)+12(nonce)+plaintext+16(tag) = 36+plaintext
-// Available: 512 - 68 = 444 bytes for the encrypted block output
-// → max plaintext = 444 - 36 = 408 bytes
-// We use 396 bytes plaintext (body) → output = 432 bytes ✓ (fits in 444)
 pub(crate) const BODY_LEN: usize = 396;
 /// Size of the VNMB-encrypted header body on disk (36 VNMB header + 396 plaintext + 16 tag).
 pub(crate) const ENC_BODY_SIZE: usize = 36 + BODY_LEN; // = 432

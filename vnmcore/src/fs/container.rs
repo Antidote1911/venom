@@ -27,8 +27,7 @@ use crate::{Result, VnmError};
 use crate::container::{
     CipherAlgorithm,
     HEADER_REGION_SIZE, SLOT_SIZE, DATA_AREA_OFFSET,
-    MAX_PASSWORD_SLOTS, MAX_KEY_SLOTS, PW_SLOT_SIZE, KEY_SLOT_SIZE, RECIPIENT_AREA_SIZE,
-    encode_header, decode_header, read_header_plaintext, kdf_params_for_profile,
+    MAX_PASSWORD_SLOTS, MAX_KEY_SLOTS, PW_SLOT_SIZE, KEY_SLOT_SIZE,     encode_header, decode_header, read_header_plaintext, kdf_params_for_profile,
     encode_password_slot, try_password_slot,
     encode_key_slot, try_key_slot,
     read_slot_fingerprint,
@@ -185,10 +184,10 @@ impl VnmContainer {
             // So for the hidden header, K_hidden = Argon2id(h.password, salt_in_hidden_hdr).
             // The hidden header was already written above, but we need to re-think the design.
             // Let me use the V2 approach for the hidden header: derive K_master from password.
-            drop(pw_slot); // unused
+            let _ = pw_slot;
 
             // Re-derive the hidden master key from the password (standard approach for hidden)
-            let mut hkdf = kdf_params_for_profile(h.kdf_profile);
+            let _hkdf = kdf_params_for_profile(h.kdf_profile);
             // Use a random salt stored in the hidden header's first 64 bytes
             // → already done by encode_header (it generates a random salt internally)
             // We need to get K_hidden from the password when opening.
@@ -275,7 +274,7 @@ impl VnmContainer {
         let outer_raw  = read_512_at(path, 0)?;
         let hidden_raw = read_512_at(path, file_size.saturating_sub(512)).unwrap_or([0u8; 512]);
 
-        let (cipher, kdf_profile, n_pw, n_key) = read_header_plaintext(&outer_raw);
+        let (cipher, _kdf_profile, n_pw, n_key) = read_header_plaintext(&outer_raw);
 
         // Try outer volume
         let k_outer = match &credential {
@@ -528,7 +527,7 @@ fn try_key_slots(path: &Path, private: &HybridPrivateKey, n: u8, cipher: CipherA
 /// Re-write the outer header with updated slot counts (after add/remove recipient).
 fn update_slot_counts(
     path: &Path, n_pw: u8, n_key: u8, k_master: &[u8; 32],
-    cipher: CipherAlgorithm, old_raw: &[u8; 512],
+    _cipher: CipherAlgorithm, old_raw: &[u8; 512],
 ) -> Result<()> {
     // Decode existing metadata
     let meta = decode_header(old_raw, k_master, false)?;

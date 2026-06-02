@@ -15,7 +15,7 @@
 //!   [1608..1676] VNMB encrypted K_master   — AEAD(hybrid_key, K_master, 68 bytes)
 //!               AAD: b"vnm:key:v1"
 
-use crate::{Result, VnmError};
+use crate::Result;
 use crate::container::{CipherAlgorithm, kdf_params_for_profile_id};
 use crate::crypto::{derive_key, encrypt_block, decrypt_block};
 use crate::crypto::hybrid_kem::{HybridPublicKey, HybridPrivateKey, encapsulate, decapsulate};

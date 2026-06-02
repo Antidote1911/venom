@@ -9,9 +9,8 @@ use std::path::PathBuf;
 use vnmcore::{
     HybridPublicKey, HybridPrivateKey,
     hybrid_generate,
-    KeyFileData, KeyPublicData,
     write_key_file, write_key_file_protected, write_pub_file,
-    read_key_file, read_key_file_protected, read_key_public, read_pub_file,
+    read_key_file, read_key_file_protected, read_key_public,
     fp_display,
 };
 
@@ -72,7 +71,7 @@ impl KeyStore {
     fn generate_inner(&mut self, label: &str, passphrase: Option<&[u8]>, kdf_profile: u8) -> Result<KeyEntry, String> {
         let key = hybrid_generate();
         let fp     = key.fingerprint();
-        let fp_hex = fp_display(&fp);
+        let _fp_hex = fp_display(&fp);
         let path   = self.dir.join(format!("{}.key", fp_filename(&fp)));
 
         match passphrase {
@@ -175,12 +174,14 @@ impl KeyStore {
     }
 
     /// Get the full keypair. Fails if the key is protected (use `get_key_protected`).
+    #[allow(dead_code)]
     pub fn get_key(&self, fp: &[u8; 8]) -> Option<HybridPrivateKey> {
         let path = self.dir.join(format!("{}.key", fp_filename(fp)));
         read_key_file(&path).ok().map(|kf| kf.key)
     }
 
     /// Get the full keypair, decrypting with passphrase if needed.
+    #[allow(dead_code)]
     pub fn get_key_with_passphrase(&self, fp: &[u8; 8], passphrase: &[u8]) -> Result<HybridPrivateKey, String> {
         let path = self.dir.join(format!("{}.key", fp_filename(fp)));
         read_key_file_protected(&path, passphrase)
@@ -208,6 +209,7 @@ impl KeyStore {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn key_dir(&self) -> &std::path::Path { &self.dir }
 }
 

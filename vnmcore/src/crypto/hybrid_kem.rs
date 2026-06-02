@@ -21,14 +21,9 @@
 use sha2::{Sha256, Digest};
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519Pub, StaticSecret};
 
-use ml_kem::{
-    MlKem1024, Seed as MlSeed,
-    kem::{Kem, Decapsulate, Encapsulate, KeyExport},
-    DecapsulationKey1024, EncapsulationKey1024,
-};
 
-use crate::{Result, VnmError};
-use crate::crypto::kem::{Seed as MlKemSeed, EncapKey as MlKemEncapKey, EK_SIZE, CT_SIZE};
+use crate::Result;
+use crate::crypto::kem::{Seed as MlKemSeed, EncapKey as MlKemEncapKey, CT_SIZE};
 
 pub const X25519_SK_SIZE: usize = 32;
 pub const X25519_PK_SIZE: usize = 32;
