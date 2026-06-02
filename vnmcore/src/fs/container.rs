@@ -157,14 +157,11 @@ impl VnmContainer {
                 total_slots,
                 hidden_alloc,
             )?;
-            // Initialize free list (alloc slot + root slot are reserved)
+            hidden_store.rebuild_free_list();
+            // Remove root slot from free list (it will be written next)
             {
-                let mut free: Vec<u64> = (hidden_start..total_slots)
-                    .filter(|&s| s != hidden_alloc && s != hidden_start + 1)
-                    .rev()
-                    .collect();
-                free.sort_unstable_by(|a, b| b.cmp(a));
-                *hidden_store.free.lock().unwrap() = free;
+                let mut free = hidden_store.free.lock().unwrap();
+                free.retain(|&s| s != hidden_start + 1);
             }
             // Write empty root directory
             let root_dir = VaultNode::Directory(DirectoryBlock {
@@ -211,11 +208,11 @@ impl VnmContainer {
             outer_limit,
             OUTER_ALLOC_SLOT,
         )?;
-        // Free list: [2..outer_limit) (slot 0=alloc, slot 1=root are reserved)
+        // All slots free except alloc (0) and root (1).
+        outer_store.rebuild_free_list();
         {
-            let mut free: Vec<u64> = (2..outer_limit).rev().collect();
-            free.sort_unstable_by(|a, b| b.cmp(a));
-            *outer_store.free.lock().unwrap() = free;
+            let mut free = outer_store.free.lock().unwrap();
+            free.retain(|&s| s != 1); // root will be written below
         }
         // Write empty root directory to slot 1
         let root_dir = VaultNode::Directory(DirectoryBlock {

@@ -135,35 +135,63 @@ impl SlotStore {
         free.insert(pos, slot);
     }
 
-    /// Load the free list from the allocation block on disk.
+    /// Load the allocation state from disk into the in-memory free list.
+    ///
+    /// On-disk format (inside the alloc slot's plaintext payload):
+    ///   [0..8]  total_slots u64 LE  (number of bits in the bitmap)
+    ///   [8..]   bitmap: bit `i` = 1 → slot (slot_start + i) is FREE
+    ///
+    /// A bitmap of N slots uses ceil(N/8) bytes. For 1 M slots that's 128 KB,
+    /// which exceeds one slot (32 KB). Venom therefore caps usable volume size
+    /// at (SLOT_SIZE − 4 prefix − 36 crypto − 8 header) × 8 × SLOT_SIZE ≈ 8 GB
+    /// per volume. Larger containers are rejected at creation time.
     pub fn load_free_list(&self) -> Result<()> {
-        // The alloc block might be uninitialized on a brand-new container.
-        // We detect this by trying to decrypt and falling back to a full free list.
         match self.read(self.alloc_slot) {
-            Ok(data) => {
-                let list: Vec<u64> = bincode::deserialize(&data)
-                    .map_err(|e| VnmError::Serialization(e.to_string()))?;
-                *self.free.lock().unwrap() = list;
-            }
-            Err(_) => {
-                // Fresh container or slot not yet initialized — build the full free list.
-                let mut list: Vec<u64> = (self.slot_start..self.slot_limit)
-                    .filter(|&s| s != self.alloc_slot)
-                    .rev() // store descending so pop() = lowest
-                    .collect();
+            Ok(data) if data.len() >= 8 => {
+                let n = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
+                let bitmap = &data[8..];
+                let mut list: Vec<u64> = Vec::new();
+                for i in 0..n {
+                    if (bitmap[i / 8] >> (i % 8)) & 1 == 1 {
+                        list.push(self.slot_start + i as u64);
+                    }
+                }
+                // Sort descending so pop() yields the lowest-numbered free slot.
                 list.sort_unstable_by(|a, b| b.cmp(a));
                 *self.free.lock().unwrap() = list;
+            }
+            _ => {
+                // Fresh container — every slot except the alloc block is free.
+                self.rebuild_free_list();
             }
         }
         Ok(())
     }
 
-    /// Persist the in-memory free list to the allocation block.
+    /// Persist the in-memory free list as a compact bitmap.
     pub fn save_free_list(&self) -> Result<()> {
-        let list = self.free.lock().unwrap().clone();
-        let data = bincode::serialize(&list)
-            .map_err(|e| VnmError::Serialization(e.to_string()))?;
+        let free = self.free.lock().unwrap();
+        let n    = (self.slot_limit - self.slot_start) as usize;
+        let mut bitmap = vec![0u8; (n + 7) / 8];
+        for &slot in free.iter() {
+            let i = (slot - self.slot_start) as usize;
+            bitmap[i / 8] |= 1 << (i % 8);
+        }
+        let mut data = Vec::with_capacity(8 + bitmap.len());
+        data.extend_from_slice(&(n as u64).to_le_bytes());
+        data.extend_from_slice(&bitmap);
+        drop(free); // release lock before writing to disk
         self.write(self.alloc_slot, &data)
+    }
+
+    /// Rebuild the in-memory free list assuming no slots are allocated
+    /// (used for fresh containers, before root dir is written).
+    pub fn rebuild_free_list(&self) {
+        let mut list: Vec<u64> = (self.slot_start..self.slot_limit)
+            .filter(|&s| s != self.alloc_slot)
+            .collect();
+        list.sort_unstable_by(|a, b| b.cmp(a));
+        *self.free.lock().unwrap() = list;
     }
 
     pub fn flush_file(&self) -> Result<()> {
