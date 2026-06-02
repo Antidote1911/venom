@@ -11,6 +11,10 @@
 #include <QListWidgetItem>
 #include <QFile>
 #include <QFileInfo>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QDir>
 
 namespace Venom {
 
@@ -81,6 +85,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->btnExportPub, &QPushButton::clicked, this, &MainWindow::onExportPub);
     connect(ui->btnDeleteKey, &QPushButton::clicked, this, &MainWindow::onDeleteKey);
 
+    // Enable drag & drop onto the key list
+    ui->listKeys->setAcceptDrops(true);
+    ui->listKeys->installEventFilter(this);
+
     // Refresh key lists whenever a relevant tab is shown
     connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int idx){
         if (idx == 0) refreshMountKeyList();
@@ -91,10 +99,12 @@ MainWindow::MainWindow(QWidget* parent)
     // Mount key list: clicking a local key auto-fills the path field
     connect(ui->listMountKeys, &QListWidget::currentRowChanged, this, [this](int row){
         if (row < 0 || row >= m_keys.size()) return;
+        const auto& k = m_keys.at(row);
+        if (k.isPubOnly) return; // can't mount with a public-only key
         const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
-        const QString fp   = m_keys.at(row).fingerprint.toLower().remove(QStringLiteral(":"));
-        ui->leKeyPath->setText(home + QStringLiteral("/.config/venom/keys/") + fp + QStringLiteral(".key"));
-        ui->leKeyPath->setToolTip(ui->leKeyPath->text());
+        const QString path = home + QStringLiteral("/.config/venom/keys/") + k.filename;
+        ui->leKeyPath->setText(path);
+        ui->leKeyPath->setToolTip(path);
     });
 
     // ── VenomCore signals ─────────────────────────────────────────────────────
@@ -142,8 +152,10 @@ void MainWindow::removeVaultCard(const QString& mountpoint)
 
 static QString keyDisplayText(const KeyEntry& k)
 {
-    const QString prot = k.isProtected ? QStringLiteral("[protected]  ") : QString{};
-    return prot + k.label + QStringLiteral("  —  ") +
+    QString prefix;
+    if (k.isPubOnly)   prefix = QStringLiteral("[pub]  ");
+    else if (k.isProtected) prefix = QStringLiteral("[protected]  ");
+    return prefix + k.label + QStringLiteral("  —  ") +
            k.createdAt.toString(QStringLiteral("yyyy-MM-dd"));
 }
 
@@ -169,6 +181,51 @@ void MainWindow::refreshMountKeyList()
     ui->listMountKeys->clear();
     for (const auto& k : m_keys)
         ui->listMountKeys->addItem(keyDisplayText(k));
+}
+
+// ── Drag & drop on key list ───────────────────────────────────────────────────
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched != ui->listKeys) return QMainWindow::eventFilter(watched, event);
+
+    if (event->type() == QEvent::DragEnter) {
+        auto* e = static_cast<QDragEnterEvent*>(event);
+        if (e->mimeData()->hasUrls()) {
+            for (const QUrl& url : e->mimeData()->urls()) {
+                const QString ext = QFileInfo(url.toLocalFile()).suffix().toLower();
+                if (ext == QLatin1String("key") || ext == QLatin1String("pub")) {
+                    e->acceptProposedAction();
+                    return true;
+                }
+            }
+        }
+        return true;
+    }
+
+    if (event->type() == QEvent::Drop) {
+        auto* e = static_cast<QDropEvent*>(event);
+        const QString storeDir = QString::fromLocal8Bit(qgetenv("HOME"))
+                                 + QStringLiteral("/.config/venom/keys/");
+        QDir().mkpath(storeDir);
+        bool imported = false;
+        for (const QUrl& url : e->mimeData()->urls()) {
+            const QString src = url.toLocalFile();
+            const QString ext = QFileInfo(src).suffix().toLower();
+            if (ext != QLatin1String("key") && ext != QLatin1String("pub")) continue;
+
+            const QString dest = storeDir + QFileInfo(src).fileName();
+            if (QFileInfo(src).canonicalFilePath() == QFileInfo(dest).canonicalFilePath()) continue;
+            if (QFile::exists(dest)) QFile::remove(dest);
+            QFile::copy(src, dest);
+            imported = true;
+        }
+        if (imported) refreshKeyList();
+        e->acceptProposedAction();
+        return true;
+    }
+
+    return QMainWindow::eventFilter(watched, event);
 }
 
 // ── Tab 2: Create ─────────────────────────────────────────────────────────────
@@ -198,10 +255,8 @@ void MainWindow::onCreateContainer()
     QStringList recipientPaths;
     for (auto* item : ui->listCreateKeys->selectedItems()) {
         const int row = ui->listCreateKeys->row(item);
-        if (row >= 0 && row < m_keys.size()) {
-            const QString fp = m_keys.at(row).fingerprint.toLower().remove(QStringLiteral(":"));
-            recipientPaths << home + QStringLiteral("/.config/venom/keys/") + fp + QStringLiteral(".key");
-        }
+        if (row >= 0 && row < m_keys.size())
+            recipientPaths << home + QStringLiteral("/.config/venom/keys/") + m_keys.at(row).filename;
     }
 
     m_core->createContainer(path, pw, static_cast<quint64>(ui->sbSize->value()),
@@ -270,9 +325,25 @@ void MainWindow::onImportKey()
     if (src.isEmpty()) return;
 
     const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
-    const QString dest = home + QStringLiteral("/.config/venom/keys/") + QFileInfo(src).fileName();
+    const QString storeDir = home + QStringLiteral("/.config/venom/keys/");
+    const QString dest = storeDir + QFileInfo(src).fileName();
+
+    // Create the store directory if it doesn't exist yet
+    QDir().mkpath(storeDir);
+
+    // If the file is already in the store, nothing to do
+    if (QFileInfo(src).canonicalFilePath() == QFileInfo(dest).canonicalFilePath()) {
+        QMessageBox::information(this, {}, tr("This key is already in the store."));
+        return;
+    }
+
+    // Overwrite if a key with the same filename already exists
+    if (QFile::exists(dest))
+        QFile::remove(dest);
+
     if (!QFile::copy(src, dest)) {
-        QMessageBox::warning(this, {}, tr("Could not copy the key file to the store."));
+        QMessageBox::warning(this, {}, tr("Could not copy the key file to the store.\n%1 → %2")
+                             .arg(src, dest));
         return;
     }
     refreshKeyList();
@@ -282,20 +353,28 @@ void MainWindow::onExportPub()
 {
     const int row = ui->listKeys->currentRow();
     if (row < 0 || row >= m_keys.size()) {
-        QMessageBox::information(this, {}, tr("Select a keypair first."));
+        QMessageBox::information(this, {}, tr("Select a key first."));
         return;
     }
-    const auto& k    = m_keys.at(row);
+    const auto& k = m_keys.at(row);
     const QString dest = QFileDialog::getSaveFileName(
         this, tr("Export public key"), k.label + QStringLiteral(".pub"),
         tr("Venom public key (*.pub)"));
     if (dest.isEmpty()) return;
 
-    const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
-    const QString fp   = k.fingerprint.toLower().remove(QStringLiteral(":"));
-    const QString kp   = home + QStringLiteral("/.config/venom/keys/") + fp + QStringLiteral(".key");
     const QString dp   = dest.endsWith(QLatin1String(".pub")) ? dest : dest + QLatin1String(".pub");
-    m_core->exportPublicKey(kp, dp, {});
+    const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
+    const QString src  = home + QStringLiteral("/.config/venom/keys/") + k.filename;
+
+    if (k.isPubOnly) {
+        // Already a public-only file — just copy it to the destination
+        if (QFile::exists(dp)) QFile::remove(dp);
+        if (!QFile::copy(src, dp))
+            QMessageBox::warning(this, {}, tr("Could not copy the public key file.\n%1").arg(src));
+    } else {
+        // Extract the public part from the .key file via FFI
+        m_core->exportPublicKey(src, dp, {});
+    }
 }
 
 void MainWindow::onDeleteKey()
@@ -304,13 +383,13 @@ void MainWindow::onDeleteKey()
     if (row < 0 || row >= m_keys.size()) return;
     const auto& k = m_keys.at(row);
 
+    const QString what = k.isPubOnly ? tr("public key") : tr("keypair");
     if (QMessageBox::question(this, {},
-            tr("Delete keypair ‘%1’?\nThis cannot be undone.").arg(k.label),
+            tr("Delete %1 ‘%2’?\nThis cannot be undone.").arg(what, k.label),
             QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) return;
 
     const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
-    const QString fp   = k.fingerprint.toLower().remove(QStringLiteral(":"));
-    QFile::remove(home + QStringLiteral("/.config/venom/keys/") + fp + QStringLiteral(".key"));
+    QFile::remove(home + QStringLiteral("/.config/venom/keys/") + k.filename);
     refreshKeyList();
 }
 

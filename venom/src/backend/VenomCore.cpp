@@ -176,8 +176,10 @@ QList<KeyEntry> VenomCore::localKeys() const {
             result.append(KeyEntry{
                 .fingerprint = QString::fromLatin1(reinterpret_cast<const char*>(info.fingerprint)),
                 .label       = QString::fromUtf8(reinterpret_cast<const char*>(info.label)),
+                .filename    = QString::fromUtf8(reinterpret_cast<const char*>(info.filename)),
                 .createdAt   = QDateTime::fromSecsSinceEpoch(static_cast<qint64>(info.created_at)),
-                .isProtected = info.is_protected
+                .isProtected = info.is_protected,
+                .isPubOnly   = info.is_pub_only
             });
         }
     }

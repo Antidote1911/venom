@@ -32,8 +32,10 @@ typedef struct VnmKeyList VnmKeyList;
 typedef struct {
     uint8_t  fingerprint[24];   /**< Hex with colons: "ab:cd:ef:01:23:45:67:89\0" */
     uint8_t  label[128];        /**< UTF-8, null-terminated */
+    uint8_t  filename[256];     /**< Actual filename in the key store, e.g. "alice.pub" */
     uint64_t created_at;        /**< Unix timestamp */
     bool     is_protected;      /**< True if .key file has passphrase protection */
+    bool     is_pub_only;       /**< True for .pub files (public key only, no private) */
 } VnmKeyInfo;
 
 /* ── String helpers ─────────────────────────────────────────────────────────── */

@@ -294,10 +294,12 @@ pub extern "C" fn vnm_key_export_pub(
 /// Info for one key entry (FFI-safe, fixed-size).
 #[repr(C)]
 pub struct VnmKeyInfo {
-    pub fingerprint: [u8; 24],
-    pub label:       [u8; 128],
-    pub created_at:  u64,
+    pub fingerprint:  [u8; 24],
+    pub label:        [u8; 128],
+    pub filename:     [u8; 256],  // actual filename in the key store (e.g. "alice.pub")
+    pub created_at:   u64,
     pub is_protected: bool,
+    pub is_pub_only:  bool,       // true for .pub files (no private key)
 }
 
 fn fill(buf: &mut [u8], s: &str) {
@@ -307,8 +309,9 @@ fn fill(buf: &mut [u8], s: &str) {
     buf[n] = 0;
 }
 
+// (fingerprint, label, filename, created_at, is_protected, is_pub_only)
 pub struct VnmKeyList {
-    entries: Vec<(String, String, u64, bool)>,
+    entries: Vec<(String, String, String, u64, bool, bool)>,
 }
 
 #[no_mangle]
@@ -319,13 +322,23 @@ pub extern "C" fn vnm_keylist_load() -> *mut VnmKeyList {
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for item in rd.flatten() {
             let p = item.path();
-            if p.extension().and_then(|e| e.to_str()) != Some("key") { continue; }
-            if let Ok(d) = read_key_public(&p) {
-                v.push((fp_display(&d.public.fingerprint()), d.label, d.created_at, d.is_protected));
+            let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            match p.extension().and_then(|e| e.to_str()) {
+                Some("key") => {
+                    if let Ok(d) = read_key_public(&p) {
+                        v.push((fp_display(&d.public.fingerprint()), d.label, fname, d.created_at, d.is_protected, false));
+                    }
+                }
+                Some("pub") => {
+                    if let Ok(d) = vnmcore::read_pub_file(&p) {
+                        v.push((fp_display(&d.public.fingerprint()), d.label, fname, d.created_at, false, true));
+                    }
+                }
+                _ => {}
             }
         }
     }
-    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v.sort_by(|a, b| b.3.cmp(&a.3));
     Box::into_raw(Box::new(VnmKeyList { entries: v }))
 }
 
@@ -345,11 +358,13 @@ pub extern "C" fn vnm_keylist_get(list: *const VnmKeyList, i: usize, out: *mut V
     if list.is_null() || out.is_null() { return false; }
     let entries = unsafe { &(*list).entries };
     if i >= entries.len() { return false; }
-    let (fp, lbl, ts, prot) = &entries[i];
+    let (fp, lbl, fname, ts, prot, pub_only) = &entries[i];
     let info = unsafe { &mut *out };
     fill(&mut info.fingerprint, fp);
     fill(&mut info.label, lbl);
+    fill(&mut info.filename, fname);
     info.created_at   = *ts;
     info.is_protected = *prot;
+    info.is_pub_only  = *pub_only;
     true
 }

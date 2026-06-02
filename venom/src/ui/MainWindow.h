@@ -16,6 +16,8 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private slots:
     // VenomCore signals
     void onMountStarted(const Venom::MountedContainer& info);

@@ -25,8 +25,10 @@ struct MountedContainer {
 struct KeyEntry {
     QString     fingerprint;
     QString     label;
+    QString     filename;             // actual filename in the store (e.g. "alice.pub")
     QDateTime   createdAt;
     bool        isProtected = false;
+    bool        isPubOnly   = false;  // .pub file — no private key
 };
 
 // ── VenomCore ─────────────────────────────────────────────────────────────────
