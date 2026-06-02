@@ -13,7 +13,6 @@ pub enum Screen {
     KeyManager,
 }
 
-/// Live status of a mount — updated from the background thread.
 #[derive(Debug, Clone)]
 pub enum MountStatus {
     Mounting,
@@ -25,46 +24,51 @@ pub enum MountStatus {
 pub struct MountedVault {
     pub vault_path: String,
     pub mountpoint: String,
-    pub status: Arc<Mutex<MountStatus>>,
+    pub status:     Arc<Mutex<MountStatus>>,
 }
 
 /// State for the key manager screen.
 #[derive(Default)]
 pub struct KeyManagerView {
-    pub new_label: String,
+    // Generate panel
+    pub new_label:            String,
+    pub use_passphrase:       bool,
+    pub new_passphrase:       String,
+    pub new_passphrase_confirm: String,
+    pub new_kdf_sensitive:    bool,
+
+    // Passphrase-change panel (visible when a protected key is selected)
+    pub selected_fp:          Option<[u8; 8]>,
+    pub unlock_passphrase:    String,
+    pub change_passphrase:    String,
+    pub change_passphrase_confirm: String,
+    pub change_kdf_sensitive: bool,
 }
 
 /// State for the recipient management screen.
 #[derive(Default)]
 pub struct RecipientView {
-    /// Mountpoint of the currently managed container.
     pub mountpoint:       Option<String>,
-    /// Container file path (needed for add/remove operations).
     pub container_path:   String,
-    /// Cached recipient list loaded from the container.
     pub recipients:       Vec<vnmcore::RecipientInfo>,
-    /// Fingerprint pending removal (set by UI, cleared by action).
     pub pending_remove:   Option<[u8; 8]>,
-    // Add password
     pub new_password:     String,
-    // Add ML-KEM key
     pub new_pubkey_path:  String,
-    // Generate keypair
     pub keygen_path:      String,
 }
 
 pub struct VenomApp {
-    pub screen:             Screen,
-    pub mounted:            Vec<MountedVault>,
-    pub status_msg:         Option<(String, bool)>,
-    pub egui_ctx:           egui::Context,
-    pub recent:             RecentList,
-    pub recent_enriched:    HashSet<String>,
-    pub keys:               KeyStore,
-    pub create_view:        CreateView,
-    pub mount_view:         MountView,
-    pub recipient_view:     RecipientView,
-    pub key_manager_view:   KeyManagerView,
+    pub screen:           Screen,
+    pub mounted:          Vec<MountedVault>,
+    pub status_msg:       Option<(String, bool)>,
+    pub egui_ctx:         egui::Context,
+    pub recent:           RecentList,
+    pub recent_enriched:  HashSet<String>,
+    pub keys:             KeyStore,
+    pub create_view:      CreateView,
+    pub mount_view:       MountView,
+    pub recipient_view:   RecipientView,
+    pub key_manager_view: KeyManagerView,
 }
 
 impl VenomApp {
@@ -87,10 +91,7 @@ impl VenomApp {
     pub fn set_status(&mut self, msg: impl Into<String>, is_error: bool) {
         self.status_msg = Some((msg.into(), is_error));
     }
-
-    pub fn clear_status(&mut self) {
-        self.status_msg = None;
-    }
+    pub fn clear_status(&mut self) { self.status_msg = None; }
 }
 
 impl eframe::App for VenomApp {
@@ -110,7 +111,6 @@ impl eframe::App for VenomApp {
             self.recent_enriched.insert(path);
         }
 
-        // Handle pending recipient removal
         if let Some(fp) = self.recipient_view.pending_remove.take() {
             self.action_remove_key_recipient(fp);
         }

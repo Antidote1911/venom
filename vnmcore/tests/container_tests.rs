@@ -182,3 +182,48 @@ fn multiple_key_recipients() {
 
     std::fs::remove_file(&path).ok();
 }
+
+// ── Key file passphrase protection ────────────────────────────────────────────
+
+#[test]
+fn key_file_passphrase_protect_roundtrip() {
+    use vnmcore::crypto::key_file::{
+        encode_key_file, encode_key_file_protected,
+        decode_key_file, decode_key_file_with_passphrase,
+        read_public_from_key_bytes,
+    };
+
+    let key = vnmcore::hybrid_generate();
+    let label = "test-key";
+
+    // Unprotected encode/decode
+    let raw = encode_key_file(&key, label);
+    let kf  = decode_key_file(&raw).unwrap();
+    assert_eq!(kf.key.x25519_sk, key.x25519_sk);
+    assert_eq!(kf.key.mlkem_seed, key.mlkem_seed);
+    assert!(!kf.is_protected);
+
+    // Public portions readable without passphrase from unprotected
+    let pub_data = read_public_from_key_bytes(&raw).unwrap();
+    assert_eq!(pub_data.public.x25519_pk, key.public.x25519_pk);
+    assert!(!pub_data.is_protected);
+
+    // Protected encode/decode
+    let enc = encode_key_file_protected(&key, label, b"s3cret", 0).unwrap();
+    // Public portions still readable without passphrase
+    let pub_enc = read_public_from_key_bytes(&enc).unwrap();
+    assert_eq!(pub_enc.public.x25519_pk, key.public.x25519_pk);
+    assert!(pub_enc.is_protected);
+
+    // Decoding without passphrase fails
+    assert!(decode_key_file(&enc).is_err());
+
+    // Wrong passphrase fails
+    assert!(decode_key_file_with_passphrase(&enc, b"wrong").is_err());
+
+    // Correct passphrase succeeds
+    let kf2 = decode_key_file_with_passphrase(&enc, b"s3cret").unwrap();
+    assert_eq!(kf2.key.x25519_sk,   key.x25519_sk);
+    assert_eq!(kf2.key.mlkem_seed,  key.mlkem_seed);
+    assert!(kf2.is_protected);
+}
