@@ -7,8 +7,8 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Venom")
-            .with_inner_size([780.0, 540.0])
-            .with_min_inner_size([620.0, 420.0]),
+            .with_inner_size([900.0, 620.0])
+            .with_min_inner_size([800.0, 580.0]),
         ..Default::default()
     };
 

@@ -1,6 +1,6 @@
 # Venom — Project Status
 
-> Last updated: 2026-06-02 (passphrase protection for .key files)
+> Last updated: 2026-06-02
 
 ## What is Venom?
 
@@ -226,11 +226,39 @@ container.read_node / write_node / update_node / free_node / flush
 - [x] Add password recipient / add hybrid key recipient (browse `.pub`)
 - [x] Remove hybrid recipient by fingerprint
 
-#### Create / Mount / Vault list
-- [x] Create: size, hidden volume, KDF cards, save-as browser
-- [x] Mount: `📄 Open file` / `📁 Folder…`, single passphrase field
+#### Create form
+- [x] Two-column layout; save-as browser (`.vnm`); size field; KDF profile cards
+- [x] **Key recipients panel** — checkboxes for each known keypair; password becomes
+  optional when at least one recipient is selected (key-only container supported)
+- [x] Hidden volume section; live size validation; passphrase match indicator
+- [x] "Create container" button disabled until form is valid
+
+#### Mount form
+- [x] **Credential toggle `🔒 Password / 🔑 Private key`**:
+  - Password mode: passphrase field (outer or hidden volume)
+  - Private key mode: scrollable list of keypairs from local store; click to select;
+    passphrase field appears when selected key is passphrase-protected;
+    button activates when key selected (+ passphrase if needed)
+- [x] `📄 Open file` (blue) / `📁 Folder…` (grey) pickers
+- [x] Recent containers quick-fill panel
+
+#### Vault list / lifecycle
 - [x] Vault cards: `🔐 hidden` badge, `👥 Recipients` button
-- [x] Async mount thread; state machine; open folder fallback chain
+- [x] Async mount thread; `Mounting → Mounted → Gone / Error` state machine
+- [x] Open folder fallback chain; path existence check
+
+#### Bug fixes
+- [x] **Key deletion persistence** — `remove()` now returns `Result<(), String>`,
+  surfaces errors in status bar; tries both filename formats (with/without colons)
+  for backward compatibility
+- [x] **Layout truncation** — `ui.available_width()` inside `ScrollArea::vertical()`
+  inflates column widths. Fixed by:
+  - Calculating column width **before** the `ScrollArea`
+  - Using `ui.set_max_width(avail)` inside scroll areas
+  - `allocate_ui_with_layout(Vec2::new(col, ∞), ...)` for explicit column sizing
+  - `profile_card` uses `ui.set_width(col - 24.0)` instead of `set_min_width(available)`
+
+#### Recent containers / UI design
 - [x] Recent containers (10 entries, JSON)
 - [x] Custom dark theme, topbar badges
 
@@ -253,8 +281,6 @@ container.read_node / write_node / update_node / free_node / flush
 
 - [ ] **Key integration with Recipients screen** — use the local key store to
   select a recipient by label/fingerprint instead of browsing for a raw `.pub`
-- [ ] **Mount with hybrid key** — `OpenCredential::PrivateKey` path in the mount form
-  (pick a key from the store or browse for a `.key` file)
 - [ ] Progress bar during container creation
 - [ ] Outer safe-fill warning for hidden volumes
 - [ ] Vault browser panel, tray icon, auto-unmount on idle
