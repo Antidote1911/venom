@@ -4,7 +4,6 @@ mod create;
 mod mount;
 mod statusbar;
 
-pub use vault_list::VaultListView;
 pub use create::CreateView;
 pub use mount::MountView;
 

@@ -1,4 +1,5 @@
-use crate::ui::{CreateView, MountView, VaultListView};
+use std::sync::{Arc, Mutex};
+use crate::ui::{CreateView, MountView};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Screen {
@@ -7,34 +8,48 @@ pub enum Screen {
     Mount,
 }
 
-/// A vault that has been opened and is currently mounted.
+/// Live status of a mount — updated from the background thread.
 #[derive(Debug, Clone)]
+pub enum MountStatus {
+    /// KDF + FUSE handshake in progress.
+    Mounting,
+    /// FUSE filesystem live and accepting writes.
+    Mounted {
+        label: Option<String>,
+        cipher: String,
+        created_at: u64,
+    },
+    /// Mount failed (wrong password, I/O error, FUSE error…).
+    Error(String),
+}
+
 pub struct MountedVault {
     pub vault_path: String,
     pub mountpoint: String,
-    pub label: Option<String>,
-    pub cipher: String,
+    /// Shared with the background thread — updated atomically.
+    pub status: Arc<Mutex<MountStatus>>,
 }
 
 pub struct VenomApp {
     pub screen: Screen,
     pub mounted: Vec<MountedVault>,
-    pub status_msg: Option<(String, bool)>, // (message, is_error)
+    pub status_msg: Option<(String, bool)>,
+    /// Cloned into mount threads so they can trigger a repaint.
+    pub egui_ctx: egui::Context,
 
     pub create_view: CreateView,
     pub mount_view: MountView,
-    pub list_view: VaultListView,
 }
 
 impl VenomApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             screen: Screen::VaultList,
             mounted: vec![],
             status_msg: None,
+            egui_ctx: cc.egui_ctx.clone(),
             create_view: CreateView::default(),
             mount_view: MountView::default(),
-            list_view: VaultListView::default(),
         }
     }
 
@@ -49,6 +64,14 @@ impl VenomApp {
 
 impl eframe::App for VenomApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Keep the UI animating while any vault is still connecting.
+        let any_mounting = self.mounted.iter().any(|mv| {
+            matches!(*mv.status.lock().unwrap(), MountStatus::Mounting)
+        });
+        if any_mounting {
+            ctx.request_repaint();
+        }
+
         crate::ui::render(self, ctx);
     }
 }
