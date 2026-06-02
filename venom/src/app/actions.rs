@@ -165,8 +165,20 @@ impl VenomApp {
 
     // ── Open folder ───────────────────────────────────────────────────────────
 
-    pub fn action_open_folder(&self, path: &str) {
-        open_in_file_manager(path);
+    pub fn action_open_folder(&mut self, path: &str) {
+        // Verify the path is reachable before trying to open it.
+        if !std::path::Path::new(path).exists() {
+            self.set_status(
+                format!("Cannot open '{path}': directory not found or vault not mounted."),
+                true,
+            );
+            return;
+        }
+
+        match open_in_file_manager(path) {
+            Ok(bin) => self.set_status(format!("Opened {path} with {bin}"), false),
+            Err(e)  => self.set_status(format!("Could not open folder: {e}"), true),
+        }
     }
 }
 
@@ -214,17 +226,59 @@ fn unmount_platform(mountpoint: &str) -> Result<(), String> {
     }
 }
 
-fn open_in_file_manager(path: &str) {
+/// Try to open `path` in a file manager.
+/// Returns the name of the binary used on success, or an error string.
+fn open_in_file_manager(path: &str) -> Result<String, String> {
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+        // Ordered candidate list: generic portal first, then common DEs.
+        // xdg-open delegates to the right app depending on XDG_CURRENT_DESKTOP.
+        // If it's missing or broken we fall back to well-known file managers.
+        let candidates = [
+            "xdg-open",   // generic (GNOME, KDE, XFCE, …)
+            "nautilus",   // GNOME
+            "dolphin",    // KDE
+            "thunar",     // XFCE
+            "nemo",       // Cinnamon
+            "pcmanfm",    // LXDE / LXQt
+            "caja",       // MATE
+        ];
+
+        let mut last_err = String::from("no file manager found in PATH");
+
+        for bin in &candidates {
+            match std::process::Command::new(bin).arg(path).spawn() {
+                Ok(_)  => return Ok(bin.to_string()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Not installed — try the next candidate.
+                    continue;
+                }
+                Err(e) => {
+                    // Present but failed to launch (permissions, etc.).
+                    last_err = format!("{bin}: {e}");
+                    continue;
+                }
+            }
+        }
+
+        Err(last_err)
     }
+
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(path).spawn();
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map(|_| "open".to_string())
+            .map_err(|e| format!("open: {e}"))
     }
+
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("explorer").arg(path).spawn();
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map(|_| "explorer".to_string())
+            .map_err(|e| format!("explorer: {e}"))
     }
 }
