@@ -29,3 +29,7 @@ hmac = { workspace = true }
 serde_bytes = { workspace = true }
 fuser = { workspace = true, optional = true }
 libc = { version = "0.2", optional = true }
+
+[[example]]
+name = "mount_test"
+required-features = ["fuse"]

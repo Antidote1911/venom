@@ -614,8 +614,9 @@ pub mod driver {
         let fs = VenomFuse::new(vault);
         let options = vec![
             MountOption::FSName("venom".into()),
-            MountOption::AutoUnmount,
-            // AllowOther requires user_allow_other in /etc/fuse.conf or root — omitted.
+            // AutoUnmount and AllowOther both require elevated privileges or
+            // /etc/fuse.conf settings on many Linux distros — omitted for
+            // unprivileged use. Unmount explicitly with fusermount3 -u <mp>.
         ];
         fuser::mount2(fs, mountpoint, &options).map_err(VnmError::Io)
     }
