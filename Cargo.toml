@@ -1,5 +1,5 @@
 [workspace]
-members = ["vnmcore", "venom"]
+members = ["vnmcore", "venom", "vnmcore-ffi"]
 resolver = "2"
 
 [workspace.package]
