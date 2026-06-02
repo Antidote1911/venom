@@ -65,12 +65,19 @@ venom/
   - `getattr` returns cached size for open dirty files (keeps kernel metadata consistent)
 - [x] **Multi-block files** — files > 30 KB are split across continuation blocks;
   old continuation blocks are deleted on every flush
-- [x] **Unmount** — `fusermount3` → `fusermount` fallback on Linux; `umount` on macOS
-- [x] **Mount options hardened** — `AllowOther` and `AutoUnmount` removed; both require
-  elevated privileges or `/etc/fuse.conf` on Arch/modern Linux and caused EPERM for
-  unprivileged users. Mounts are owner-only by design.
-- [x] **Diagnostic example** — `cargo run -p vnmcore --example mount_test` to test
-  FUSE independently of the GUI
+- [x] **`FOPEN_DIRECT_IO`** — set in `open()` and `create()` replies, bypasses the
+  kernel page cache entirely. Without this flag the kernel buffers dirty pages and
+  flushes them using `fh = 0` (no file handle); our fallback path would hit EIO.
+  Fix eliminates the GIO `.goutputstream-*` residue bug and the "erreur
+  d'entrée/sortie" shown by Thunar/XFCE after creating a new file.
+- [x] **`statfs()`** — reports a large virtual disk (~512 GB free) so file managers
+  don't interpret the default fuser `bavail = 0` as "no space left" and refuse
+  to create files.
+- [x] **Mount options hardened** — `AllowOther` removed (requires `user_allow_other`
+  in `/etc/fuse.conf` → EPERM for unprivileged users); `AutoUnmount` removed (same
+  issue on Arch / modern kernels). Mounts are owner-only. Unmount via
+  `fusermount3 -u <mp>` or the GUI button.
+- [x] **Diagnostic example** — `cargo run -p vnmcore --example mount_test`
 
 ### Tests — 56 total, all passing
 
@@ -86,66 +93,83 @@ venom/
 #### Mount lifecycle
 - [x] **Async mount** — dedicated thread per mount (`vnm-mount:<mp>`); KDF + FUSE
   never block the UI thread
-- [x] **Mount status machine** — `Mounting` (spinner) → `Mounted` (green) →
-  `Gone` (clean unmount, auto-removed) → `Error` (red, dismissable)
-- [x] **`Arc<Mutex<MountStatus>>`** shared between UI and mount thread; thread calls
+- [x] **Mount status machine** — `Mounting` → `Mounted` → `Gone` (auto-removed) →
+  `Error` (red, dismissable)
+- [x] **`Arc<Mutex<MountStatus>>`** shared with mount thread; thread calls
   `ctx.request_repaint()` on every state change
-- [x] **Duplicate mountpoint guard** — rejects second mount to the same path
-- [x] **Unmount** — `action_unmount` calls `fusermount3` → `fusermount` fallback;
-  returns `Result<(), String>`; card stays if unmount fails with error in status bar
-- [x] **`MountStatus::Gone`** — mount thread sets this on clean `driver::mount()` return;
+- [x] **Duplicate mountpoint guard**
+- [x] **Unmount** — `fusermount3` → `fusermount` fallback; returns `Result<(), String>`;
+  card stays visible if unmount fails, with error in status bar
+- [x] **`MountStatus::Gone`** — set by thread on clean `driver::mount()` return;
   `gc_gone_mounts()` removes the card on the next frame tick
-- [x] **`Dismiss error`** — remove failed vault cards without unmounting
+- [x] **Dismiss error** — remove failed vault cards
 
 #### Open folder
-- [x] **Path existence check** — verifies mountpoint exists before launching
+- [x] **Path existence check** before launching
 - [x] **Fallback chain** — `xdg-open` → `nautilus` → `dolphin` → `thunar` →
-  `nemo` → `pcmanfm` → `caja` (skips `NotFound`, reports other errors)
-- [x] **Status feedback** — shows which binary was used on success, or the error
+  `nemo` → `pcmanfm` → `caja`
+- [x] **Status feedback** — shows binary used on success, error message on failure
 
 #### Recent vaults (`~/.config/venom/recent.json`)
-- [x] **Persistence** — up to 10 entries, JSON, auto-saved on every change
-- [x] **Progressive enrichment** — cipher read from `vnm_bootstrap.json` immediately
-  (no KDF); label synced by `update()` once mount thread reports `Mounted`
-- [x] **Vault list — empty state** — hero icon + "Recent Vaults" section; each row
-  shows name, path, cipher pill, last-used date; `[Mount]` fills path + navigates;
-  `[✕]` removes entry; row greyed + button disabled if directory not found
-- [x] **Vault list — non-empty state** — unmounted recent vaults shown below active cards
-- [x] **Mount form** — "Recent Vaults" quick-fill panel; click row fills vault path;
-  selected row highlighted; entries marked "not found" are non-clickable
+- [x] Persist up to 10 entries, deduplication, JSON
+- [x] Cipher read from `vnm_bootstrap.json` immediately (no KDF needed)
+- [x] Label synced by `update()` once mount thread reports `Mounted`
+- [x] Vault list empty state: recent section with `[Mount]` and `[✕]` per row
+- [x] Vault list non-empty: unmounted recent vaults shown at the bottom
+- [x] Mount form: quick-fill panel (click row → fills vault path)
+- [x] Rows greyed and unclickable when vault directory not found on disk
 
 #### UI design
-- [x] **Dark theme** — custom palette via `egui::Visuals` + `egui::Style`
-  (`BG` / `PANEL` / `CARD` / `ACCENT` / `SUCCESS` / `WARN` / `ERROR` / `BTN_*`)
-- [x] **Topbar** — mounted count badge (green), connecting spinner (yellow)
-- [x] **Create view** — two-column layout, inline password match indicator (✓/✗),
-  KDF profile cards with visual selection, primary button disabled until form is valid
-- [x] **Mount view** — two-column layout with "How it works" and "Prerequisites" panels
-- [x] **Vault list cards** — status-aware border colour, cipher pill, creation date,
-  "read-write" label, sized action buttons
+- [x] Custom dark theme (`theme.rs`) — `BG / PANEL / CARD / ACCENT / SUCCESS / WARN / ERROR / BTN_*`
+- [x] Topbar — mounted count badge, connecting spinner
+- [x] Create view — two-column layout, password match indicator, KDF profile cards,
+  primary button disabled until form is valid
+- [x] Mount view — two-column layout with "How it works" and "Prerequisites" panels
+- [x] Vault list cards — status-aware border colour, cipher pill, creation date,
+  "read-write" label, sized buttons
 
 ---
 
 ## In progress / not started
 
+### Container format
+
+- [ ] **Single-file container (VeraCrypt style)** — present the vault as one opaque
+  file instead of a directory of block files. Requires a new `SingleFileBlockStore`
+  that addresses blocks by slot offset within the file. The GUI would add a
+  "Container type" selector (Directory / Single file) and a "Max size" field in
+  the Create view. Both formats would be auto-detected on open.
+  Comparison vs current approach:
+  - ✓ Single opaque blob, easy to transport/backup
+  - ✓ No plaintext directory structure visible
+  - ✗ Must be pre-allocated (or use sparse file)
+  - ✗ Not cloud-sync friendly (whole file changes on any write)
+  - Estimated effort: ~2 weeks
+
+- [ ] **Vault integrity manifest** — no global checksum of block UUIDs; an attacker
+  could silently delete blocks without detection
+- [ ] **Vault metadata hiding** — `vnm_bootstrap.json` reveals KDF parameters and
+  cipher algorithm
+- [ ] **Configurable block size** — `DEFAULT_BLOCK_SIZE = 32768` is hardcoded;
+  the field exists in `VaultConfig` but is not exposed in the Create form
+- [ ] **Deduplication** — fresh nonce per encrypt; no dedup (intentional for security)
+
 ### Security
 
 - [ ] **Password zeroization in GUI** — `MountView::password` is a plain `String`;
-  it should be a `zeroize::Zeroizing<String>` or cleared immediately after the thread
-  receives its copy
-- [ ] **`action_create_vault` is synchronous** — KDF blocks the UI thread during vault
-  creation; should mirror the async mount pattern (spawn thread, show spinner)
+  should be `zeroize::Zeroizing<String>` or cleared immediately after being copied
+  into the mount thread
+- [ ] **`action_create_vault` is synchronous** — KDF blocks the UI thread during
+  creation; should mirror the async mount pattern
 - [ ] **Key stretching audit** — verify no key material leaks through stack copies
   during cipher operations
 
 ### FUSE / filesystem
 
-- [ ] **FUSE write operations are not atomic** — a crash between deleting old
-  continuation blocks and writing new ones can corrupt the vault; needs a
-  write-ahead log or copy-on-write approach
+- [ ] **Write operations are not atomic** — a crash between deleting old continuation
+  blocks and writing new ones can corrupt the vault; needs write-ahead log or CoW
 - [ ] **Directory entry ordering** — entries stored in insertion order; no sorting
-  or deduplication beyond the `EEXIST` guard
-- [ ] **Hard links / symlinks** — `link` and `symlink` ops not implemented
+- [ ] **Hard links / symlinks** — `link` and `symlink` not implemented
 - [ ] **Extended attributes** — `getxattr` / `setxattr` not implemented
 - [ ] **File timestamps** — `atime` / `mtime` / `ctime` always `UNIX_EPOCH`; no
   persistent timestamp storage in blocks
@@ -157,43 +181,27 @@ venom/
 - [ ] **Windows support** — FUSE layer is `#[cfg(target_family = "unix")]` only;
   WinFsp / Dokan integration not started
 
-### Vault format
-
-- [ ] **Vault integrity manifest** — no global checksum of block UUIDs; an attacker
-  could silently delete blocks without detection
-- [ ] **Vault metadata hiding** — `vnm_bootstrap.json` reveals KDF parameters and
-  cipher algorithm; consider encrypting or using fixed dummy values
-- [ ] **Configurable block size** — `DEFAULT_BLOCK_SIZE = 32768` is hardcoded;
-  the field exists in `VaultConfig` but is not exposed in the create form
-- [ ] **Deduplication** — fresh nonce per encrypt means identical plaintexts produce
-  different ciphertexts; no dedup (intentional for security, increases storage)
-
 ### GUI
 
 - [ ] **Vault browser** — once mounted, show the decrypted directory tree inside
   the app (file manager panel)
-- [ ] **Tray icon** — system-tray indicator showing mounted vault count; unmount
-  from tray menu
+- [ ] **Tray icon** — system-tray indicator showing mounted vault count
 - [ ] **Auto-unmount on idle** — unmount after N minutes without activity
-- [ ] **Mount from CLI** — `venom mount <vault> <mp> [--password-stdin]` for
-  scripted / headless use
-- [ ] **Progress bar during create** — KDF progress is opaque; show a deterministic
-  progress estimate or at least a spinner
-- [ ] **Windows FUSE indicator** — on Windows, explain FUSE is unavailable and
-  point to the roadmap
+- [ ] **Mount from CLI** — `venom mount <vault> <mp> [--password-stdin]`
+- [ ] **Progress bar during create** — KDF progress is opaque; show a spinner at
+  minimum, or a deterministic progress estimate
 
 ### Testing & CI
 
-- [ ] **Property-based tests** — use `proptest` to fuzz block crypto with random
+- [ ] **Property-based tests** — `proptest` to fuzz block crypto with random
   plaintexts, offsets, and sizes
-- [ ] **FUSE mount smoke test** — a CI job that mounts a test vault, writes a file
-  via the OS, reads it back, and unmounts (requires a Linux runner with FUSE enabled)
-- [ ] **Benchmarks** — block encrypt/decrypt throughput for both ciphers; KDF timing
+- [ ] **FUSE mount smoke test** — CI job that mounts a vault, writes a file via OS,
+  reads back, unmounts (requires Linux runner with FUSE)
+- [ ] **Benchmarks** — block encrypt/decrypt throughput; KDF timing
 
 ### Distribution
 
 - [ ] **GitHub Actions CI** — `cargo test` + `cargo clippy` + `cargo fmt --check`
-  on every push
 - [ ] **Release packaging** — Flatpak / AppImage for Linux, `.app` for macOS
 - [ ] **`CHANGELOG.md`** and semantic versioning
 
@@ -201,15 +209,19 @@ venom/
 
 ## Known limitations
 
-1. **Single-process mount** — the FUSE thread and GUI share the same process. If
-   the GUI crashes, the mount thread is killed. The `Drop` flush runs for normal
-   exits, but a `SIGSEGV` skips it and dirty cached data is lost.
-2. **Owner-only mounts** — `AllowOther` was removed to support unprivileged use;
+1. **Single-process mount** — if the GUI crashes, the mount thread is killed. The
+   `Drop` flush runs for clean exits; a `SIGSEGV` skips it and dirty data is lost.
+2. **Owner-only mounts** — `AllowOther` was removed to support unprivileged users;
    other users on the same machine cannot access the mountpoint.
 3. **Full-file RAM loading** — entire files are loaded into memory on `open()`. A
    1 GB file consumes 1 GB of RSS. Streaming / lazy loading is not implemented.
 4. **Password copy in thread** — password bytes are cloned into the mount thread as
    `Vec<u8>` and dropped after `Vault::open`. No explicit `zeroize` call on the copy.
 5. **Recent list stores plaintext paths** — `~/.config/venom/recent.json` reveals
-   vault directory paths. No vault content is leaked, but the existence and location
-   of vaults is visible to anyone with read access to the home directory.
+   vault directory locations. No vault content is leaked, but vault existence and
+   location are visible to anyone with read access to the home directory.
+6. **`.goutputstream-*` residue** — GIO (Thunar/XFCE, gedit, etc.) uses atomic saves
+   (create temp → write → rename). Any operation that fails mid-way leaves a
+   `.goutputstream-XXXXXX` file in the vault. This was most commonly triggered by
+   the EIO bug (now fixed with `FOPEN_DIRECT_IO`). Existing residues can be removed
+   with `find <mountpoint> -name '.goutputstream-*' -delete`.
