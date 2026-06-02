@@ -1,0 +1,6 @@
+/home/antidote/Documents/venom/venom-qt/build/CMakeFiles/vnmcore_ffi_build.dir
+/home/antidote/Documents/venom/venom-qt/build/CMakeFiles/venom-qt.dir
+/home/antidote/Documents/venom/venom-qt/build/CMakeFiles/edit_cache.dir
+/home/antidote/Documents/venom/venom-qt/build/CMakeFiles/rebuild_cache.dir
+/home/antidote/Documents/venom/venom-qt/build/CMakeFiles/venom-qt_autogen_timestamp_deps.dir
+/home/antidote/Documents/venom/venom-qt/build/CMakeFiles/venom-qt_autogen.dir

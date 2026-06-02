@@ -61,9 +61,12 @@ target_include_directories(venom-qt PRIVATE
 
 # Link the Rust library
 if(UNIX AND NOT APPLE)
+    # fuse3 is required by the fuser crate embedded in libvnmcore_ffi.a
+    find_library(FUSE3_LIB NAMES fuse3 REQUIRED)
     target_link_libraries(venom-qt PRIVATE
         Qt6::Core Qt6::Widgets Qt6::Concurrent
         "${VNM_LIB_DIR}/libvnmcore_ffi.a"
+        ${FUSE3_LIB}
         dl pthread m
     )
 elseif(APPLE)

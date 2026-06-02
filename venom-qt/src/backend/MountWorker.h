@@ -2,8 +2,8 @@
 #include <QThread>
 #include <QString>
 #include "VenomCore.h"
-
-extern "C" { #include <vnmcore.h> }
+// vnmcore.h already contains its own extern "C" guard
+#include <vnmcore.h>
 
 namespace Venom {
 
