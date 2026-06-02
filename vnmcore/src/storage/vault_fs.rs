@@ -39,8 +39,8 @@ pub struct FileBlock {
 }
 
 /// Decoded representation of any block's plaintext payload.
+/// Uses bincode's default discriminant encoding (u32) — no untagged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
 pub enum VaultNode {
     Directory(DirectoryBlock),
     File(FileBlock),
