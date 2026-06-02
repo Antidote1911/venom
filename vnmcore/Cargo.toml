@@ -19,7 +19,8 @@ subtle            = { workspace = true }
 serde             = { workspace = true }
 serde_json        = { workspace = true }
 rmp-serde         = { workspace = true }
-ml-kem.workspace = true
+ml-kem.workspace        = true
+x25519-dalek.workspace = true
 thiserror         = { workspace = true }
 anyhow            = { workspace = true }
 hex               = { workspace = true }

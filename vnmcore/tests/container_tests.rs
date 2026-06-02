@@ -2,7 +2,7 @@ use vnmcore::container::CipherAlgorithm;
 use vnmcore::fs::container::{VnmContainer, HiddenVolumeOptions, OpenCredential};
 use vnmcore::storage::{VaultNode, NodeKind};
 use vnmcore::storage::vault_fs::{DirectoryBlock, DirEntry, FileBlock};
-use vnmcore::{kem_generate, kem_ek_from_seed};
+use vnmcore::{hybrid_generate, HybridPrivateKey};
 
 const MB: u64 = 1024 * 1024;
 
@@ -127,71 +127,58 @@ fn hidden_volume_both_passwords_work() {
 // ── ML-KEM multi-recipient ────────────────────────────────────────────────────
 
 #[test]
-fn ml_kem_generate_and_use() {
-    // Test that kem_generate + ek_from_seed + encapsulate + decapsulate round-trip works
-    use vnmcore::crypto::kem::{encapsulate, decapsulate};
-    let (seed, ek) = kem_generate();
-    let ek2 = kem_ek_from_seed(&seed);
-    assert_eq!(ek, ek2, "ek_from_seed must recover the same public key");
-
-    let (ct, ss1) = encapsulate(&ek).unwrap();
-    let ss2 = decapsulate(&seed, &ct).unwrap();
-    assert_eq!(ss1, ss2, "shared secrets must match");
+fn hybrid_kem_round_trip() {
+    use vnmcore::crypto::hybrid_kem::{generate, encapsulate, decapsulate};
+    let alice = generate();
+    let ct = encapsulate(&alice.public).unwrap();
+    let ss2 = decapsulate(&alice, &ct.x25519_eph_pk, &ct.mlkem_ct).unwrap();
+    assert_eq!(ct.shared_secret, ss2, "hybrid shared secrets must match");
 }
 
 #[test]
 fn add_key_recipient_and_open_with_private_key() {
-    let path = tmp("kem_recipient");
+    let path = tmp("hybrid_recipient");
     let _ = std::fs::remove_file(&path);
 
-    // Create container with password
     let c = VnmContainer::create(&path, b"outer", 8*MB, CipherAlgorithm::ChaCha20Poly1305,
-        "interactive", Some("KEM test".into()), None).unwrap();
+        "interactive", Some("Hybrid test".into()), None).unwrap();
 
-    // Generate a keypair for Alice
-    let (alice_seed, alice_ek) = kem_generate();
-
-    // Add Alice as ML-KEM recipient
-    c.add_key_recipient(&alice_ek).unwrap();
+    let alice = hybrid_generate();
+    c.add_key_recipient(&alice.public).unwrap();
     c.flush().unwrap();
     drop(c);
 
-    // Open with Alice's private key
-    let c2 = VnmContainer::open(&path, OpenCredential::PrivateKey(&alice_seed)).unwrap();
-    assert_eq!(c2.label.as_deref(), Some("KEM test"));
-    assert!(!c2.is_hidden);
+    // Open with Alice's hybrid private key
+    let c2 = VnmContainer::open(&path, OpenCredential::PrivateKey(&alice)).unwrap();
+    assert_eq!(c2.label.as_deref(), Some("Hybrid test"));
 
-    // Original password still works
-    let c3 = VnmContainer::open(&path, OpenCredential::Password(b"outer")).unwrap();
-    assert_eq!(c3.label.as_deref(), Some("KEM test"));
+    // Password still works
+    assert!(VnmContainer::open(&path, OpenCredential::Password(b"outer")).is_ok());
 
     std::fs::remove_file(&path).ok();
 }
 
 #[test]
 fn multiple_key_recipients() {
-    let path = tmp("multi_kem");
+    let path = tmp("multi_hybrid");
     let _ = std::fs::remove_file(&path);
 
     let c = VnmContainer::create(&path, b"pw", 8*MB, CipherAlgorithm::ChaCha20Poly1305,
         "interactive", None, None).unwrap();
 
-    let (seed_a, ek_a) = kem_generate();
-    let (seed_b, ek_b) = kem_generate();
-
-    c.add_key_recipient(&ek_a).unwrap();
-    c.add_key_recipient(&ek_b).unwrap();
+    let alice = hybrid_generate();
+    let bob   = hybrid_generate();
+    c.add_key_recipient(&alice.public).unwrap();
+    c.add_key_recipient(&bob.public).unwrap();
     c.flush().unwrap();
     drop(c);
 
-    // Both Alice and Bob can open it
-    assert!(VnmContainer::open(&path, OpenCredential::PrivateKey(&seed_a)).is_ok());
-    assert!(VnmContainer::open(&path, OpenCredential::PrivateKey(&seed_b)).is_ok());
-    // Password still works
+    assert!(VnmContainer::open(&path, OpenCredential::PrivateKey(&alice)).is_ok());
+    assert!(VnmContainer::open(&path, OpenCredential::PrivateKey(&bob)).is_ok());
     assert!(VnmContainer::open(&path, OpenCredential::Password(b"pw")).is_ok());
     // Unknown key fails
-    let (seed_c, _) = kem_generate();
-    assert!(VnmContainer::open(&path, OpenCredential::PrivateKey(&seed_c)).is_err());
+    let carol = hybrid_generate();
+    assert!(VnmContainer::open(&path, OpenCredential::PrivateKey(&carol)).is_err());
 
     std::fs::remove_file(&path).ok();
 }

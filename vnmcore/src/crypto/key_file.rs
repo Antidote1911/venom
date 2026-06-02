@@ -1,152 +1,154 @@
-//! On-disk format for Venom ML-KEM-1024 key files.
+//! On-disk format for Venom hybrid keypairs.
 //!
-//! ## Public key file (.vpub, 1656 bytes)
+//! ## .key file — complete keypair (private + public, 1784 bytes)
 //!
-//!   [0..4]      magic b"VKPB"
+//!   [0..4]      b"VKEY"
 //!   [4..8]      version u32 LE = 1
-//!   [8..16]     created_at u64 LE (Unix seconds)
-//!   [16..80]    label [u8; 64] UTF-8, null-padded
-//!   [80..88]    fingerprint [u8; 8] = SHA-256(ek)[0..8]
-//!   [88..1656]  encapsulation key [u8; 1568]
+//!   [8..16]     created_at u64 LE
+//!   [16..80]    label [u8; 64]
+//!   [80..88]    fingerprint [u8; 8] = SHA-256(x25519_pk || mlkem_ek)[0..8]
+//!   [88..120]   x25519_sk [u8; 32]   (static X25519 private scalar)
+//!   [120..152]  x25519_pk [u8; 32]   (corresponding X25519 public key)
+//!   [152..216]  mlkem_seed [u8; 64]  (ML-KEM-1024 private seed)
+//!   [216..1784] mlkem_ek [u8; 1568]  (ML-KEM-1024 encapsulation key)
 //!
-//! ## Private key file (.vpriv, 153 bytes — unprotected)
+//! ## .pub file — public portion only (1688 bytes, safe to share)
 //!
-//!   [0..4]      magic b"VKPR"
+//!   [0..4]      b"VPUB"
 //!   [4..8]      version u32 LE = 1
 //!   [8..16]     created_at u64 LE
 //!   [16..80]    label [u8; 64]
 //!   [80..88]    fingerprint [u8; 8]
-//!   [88]        protected: u8 (0 = plaintext, 1 = Argon2id-AES-GCM — future)
-//!   [89..153]   seed [u8; 64]
+//!   [88..120]   x25519_pk [u8; 32]
+//!   [120..1688] mlkem_ek [u8; 1568]
 //!
-//! The private key file deliberately stores the seed in plaintext (protected=0).
-//! Security relies on filesystem permissions (chmod 600). Passphrase protection
-//! (protected=1) is reserved for a future version.
+//! The .key file stores private material unencrypted — protect with filesystem
+//! permissions (chmod 600). Passphrase protection is a future improvement.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{Result, VnmError};
-use crate::crypto::kem::{self, EncapKey, Seed, EK_SIZE, SEED_SIZE};
+use crate::crypto::hybrid_kem::{HybridPrivateKey, HybridPublicKey};
+use crate::crypto::kem::EK_SIZE;
 
-pub const PUB_MAGIC:  &[u8; 4] = b"VKPB";
-pub const PRIV_MAGIC: &[u8; 4] = b"VKPR";
-pub const KEY_VERSION: u32 = 1;
+const KEY_MAGIC:  &[u8; 4] = b"VKEY";
+const PUB_MAGIC:  &[u8; 4] = b"VPUB";
+const FILE_VERSION: u32     = 1;
 
-pub const PUB_FILE_SIZE:  usize = 4 + 4 + 8 + 64 + 8 + EK_SIZE; // 1656
-pub const PRIV_FILE_SIZE: usize = 4 + 4 + 8 + 64 + 8 + 1 + SEED_SIZE; // 153
+pub const KEY_FILE_SIZE: usize = 4 + 4 + 8 + 64 + 8 + 32 + 32 + 64 + EK_SIZE; // 1784
+pub const PUB_FILE_SIZE: usize = 4 + 4 + 8 + 64 + 8 + 32 + EK_SIZE;            // 1688
 
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-fn label_bytes(label: &str) -> [u8; 64] {
+fn label_bytes(s: &str) -> [u8; 64] {
     let mut b = [0u8; 64];
-    let s = label.as_bytes();
-    b[..s.len().min(64)].copy_from_slice(&s[..s.len().min(64)]);
+    let src = s.as_bytes();
+    b[..src.len().min(64)].copy_from_slice(&src[..src.len().min(64)]);
     b
 }
 
-fn label_from(raw: &[u8; 64]) -> String {
+fn label_str(raw: &[u8; 64]) -> String {
     let end = raw.iter().position(|&b| b == 0).unwrap_or(64);
     String::from_utf8_lossy(&raw[..end]).into_owned()
 }
 
 // ── Encode ────────────────────────────────────────────────────────────────────
 
-/// Encode a public key into its on-disk format.
-pub fn encode_pub(ek: &EncapKey, label: &str, created_at: Option<u64>) -> [u8; PUB_FILE_SIZE] {
-    let mut buf = [0u8; PUB_FILE_SIZE];
-    let ts = created_at.unwrap_or_else(now);
-    buf[0..4].copy_from_slice(PUB_MAGIC);
-    buf[4..8].copy_from_slice(&KEY_VERSION.to_le_bytes());
-    buf[8..16].copy_from_slice(&ts.to_le_bytes());
+/// Encode the full keypair to bytes ready to write as a `.key` file.
+pub fn encode_key_file(key: &HybridPrivateKey, label: &str) -> [u8; KEY_FILE_SIZE] {
+    let mut buf = [0u8; KEY_FILE_SIZE];
+    buf[0..4].copy_from_slice(KEY_MAGIC);
+    buf[4..8].copy_from_slice(&FILE_VERSION.to_le_bytes());
+    buf[8..16].copy_from_slice(&now().to_le_bytes());
     buf[16..80].copy_from_slice(&label_bytes(label));
-    buf[80..88].copy_from_slice(&kem::fingerprint(ek));
-    buf[88..88 + EK_SIZE].copy_from_slice(ek);
+    buf[80..88].copy_from_slice(&key.fingerprint());
+    buf[88..120].copy_from_slice(&key.x25519_sk);
+    buf[120..152].copy_from_slice(&key.public.x25519_pk);
+    buf[152..216].copy_from_slice(&key.mlkem_seed);
+    buf[216..216 + EK_SIZE].copy_from_slice(&key.public.mlkem_ek);
     buf
 }
 
-/// Encode a private key (seed) into its on-disk format.
-pub fn encode_priv(seed: &Seed, ek: &EncapKey, label: &str, created_at: Option<u64>) -> [u8; PRIV_FILE_SIZE] {
-    let mut buf = [0u8; PRIV_FILE_SIZE];
-    let ts = created_at.unwrap_or_else(now);
-    buf[0..4].copy_from_slice(PRIV_MAGIC);
-    buf[4..8].copy_from_slice(&KEY_VERSION.to_le_bytes());
-    buf[8..16].copy_from_slice(&ts.to_le_bytes());
+/// Encode the public portion to bytes ready to write as a `.pub` file.
+pub fn encode_pub_file(pub_key: &HybridPublicKey, label: &str, created_at: u64) -> [u8; PUB_FILE_SIZE] {
+    let mut buf = [0u8; PUB_FILE_SIZE];
+    buf[0..4].copy_from_slice(PUB_MAGIC);
+    buf[4..8].copy_from_slice(&FILE_VERSION.to_le_bytes());
+    buf[8..16].copy_from_slice(&created_at.to_le_bytes());
     buf[16..80].copy_from_slice(&label_bytes(label));
-    buf[80..88].copy_from_slice(&kem::fingerprint(ek));
-    buf[88] = 0; // protected = false
-    buf[89..89 + SEED_SIZE].copy_from_slice(seed);
+    buf[80..88].copy_from_slice(&pub_key.fingerprint());
+    buf[88..120].copy_from_slice(&pub_key.x25519_pk);
+    buf[120..120 + EK_SIZE].copy_from_slice(&pub_key.mlkem_ek);
     buf
 }
 
 // ── Decode ────────────────────────────────────────────────────────────────────
 
-#[derive(Clone)]
-pub struct PubKeyFile {
-    pub fingerprint: [u8; 8],
-    pub label:       String,
-    pub created_at:  u64,
-    pub ek:          EncapKey,
+pub struct KeyFileData {
+    pub label:      String,
+    pub created_at: u64,
+    pub key:        HybridPrivateKey,
 }
 
-#[derive(Clone)]
-pub struct PrivKeyFile {
-    pub fingerprint: [u8; 8],
-    pub label:       String,
-    pub created_at:  u64,
-    pub seed:        Seed,
+pub struct PubFileData {
+    pub label:      String,
+    pub created_at: u64,
+    pub public:     HybridPublicKey,
 }
 
-pub fn decode_pub(data: &[u8]) -> Result<PubKeyFile> {
+pub fn decode_key_file(data: &[u8]) -> Result<KeyFileData> {
+    if data.len() < KEY_FILE_SIZE {
+        return Err(VnmError::InvalidFormat(
+            format!(".key file too short ({} B, expected {KEY_FILE_SIZE})", data.len())
+        ));
+    }
+    if &data[0..4] != KEY_MAGIC {
+        return Err(VnmError::InvalidFormat("not a Venom .key file".into()));
+    }
+
+    let created_at  = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    let label_raw: &[u8; 64] = data[16..80].try_into().unwrap();
+    let x25519_sk: [u8; 32]  = data[88..120].try_into().unwrap();
+    let x25519_pk: [u8; 32]  = data[120..152].try_into().unwrap();
+    let mlkem_seed: [u8; 64] = data[152..216].try_into().unwrap();
+    let mlkem_ek: [u8; EK_SIZE] = data[216..216 + EK_SIZE].try_into().unwrap();
+
+    let public = HybridPublicKey { x25519_pk, mlkem_ek };
+    let key = HybridPrivateKey { x25519_sk, mlkem_seed, public };
+
+    Ok(KeyFileData { label: label_str(label_raw), created_at, key })
+}
+
+pub fn decode_pub_file(data: &[u8]) -> Result<PubFileData> {
     if data.len() < PUB_FILE_SIZE {
         return Err(VnmError::InvalidFormat(
-            format!("public key file too short ({} bytes, expected {PUB_FILE_SIZE})", data.len())
+            format!(".pub file too short ({} B, expected {PUB_FILE_SIZE})", data.len())
         ));
     }
     if &data[0..4] != PUB_MAGIC {
-        return Err(VnmError::InvalidFormat("not a Venom public key file".into()));
+        return Err(VnmError::InvalidFormat("not a Venom .pub file".into()));
     }
-    let created_at = u64::from_le_bytes(data[8..16].try_into().unwrap());
+
+    let created_at  = u64::from_le_bytes(data[8..16].try_into().unwrap());
     let label_raw: &[u8; 64] = data[16..80].try_into().unwrap();
-    let fingerprint: [u8; 8] = data[80..88].try_into().unwrap();
-    let ek: EncapKey = data[88..88 + EK_SIZE].try_into().unwrap();
-    Ok(PubKeyFile { fingerprint, label: label_from(label_raw), created_at, ek })
+    let x25519_pk: [u8; 32]  = data[88..120].try_into().unwrap();
+    let mlkem_ek: [u8; EK_SIZE] = data[120..120 + EK_SIZE].try_into().unwrap();
+
+    Ok(PubFileData {
+        label: label_str(label_raw),
+        created_at,
+        public: HybridPublicKey { x25519_pk, mlkem_ek },
+    })
 }
 
-pub fn decode_priv(data: &[u8]) -> Result<PrivKeyFile> {
-    if data.len() < PRIV_FILE_SIZE {
-        return Err(VnmError::InvalidFormat(
-            format!("private key file too short ({} bytes, expected {PRIV_FILE_SIZE})", data.len())
-        ));
-    }
-    if &data[0..4] != PRIV_MAGIC {
-        return Err(VnmError::InvalidFormat("not a Venom private key file".into()));
-    }
-    if data[88] != 0 {
-        return Err(VnmError::InvalidFormat(
-            "passphrase-protected private keys are not yet supported".into()
-        ));
-    }
-    let created_at = u64::from_le_bytes(data[8..16].try_into().unwrap());
-    let label_raw: &[u8; 64] = data[16..80].try_into().unwrap();
-    let fingerprint: [u8; 8] = data[80..88].try_into().unwrap();
-    let seed: Seed = data[89..89 + SEED_SIZE].try_into().unwrap();
-    Ok(PrivKeyFile { fingerprint, label: label_from(label_raw), created_at, seed })
-}
+// ── File I/O ──────────────────────────────────────────────────────────────────
 
-// ── File I/O helpers ──────────────────────────────────────────────────────────
-
-pub fn write_pub_file(path: &Path, ek: &EncapKey, label: &str) -> Result<()> {
-    let data = encode_pub(ek, label, None);
-    std::fs::write(path, &data).map_err(VnmError::Io)
-}
-
-pub fn write_priv_file(path: &Path, seed: &Seed, ek: &EncapKey, label: &str) -> Result<()> {
-    let data = encode_priv(seed, ek, label, None);
+pub fn write_key_file(path: &Path, key: &HybridPrivateKey, label: &str) -> Result<()> {
+    let data = encode_key_file(key, label);
     std::fs::write(path, &data).map_err(VnmError::Io)?;
-    // Restrict permissions on Unix
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -155,22 +157,22 @@ pub fn write_priv_file(path: &Path, seed: &Seed, ek: &EncapKey, label: &str) -> 
     Ok(())
 }
 
-pub fn read_pub_file(path: &Path) -> Result<PubKeyFile> {
-    let data = std::fs::read(path).map_err(VnmError::Io)?;
-    decode_pub(&data)
+pub fn write_pub_file(path: &Path, pub_key: &HybridPublicKey, label: &str, created_at: u64) -> Result<()> {
+    let data = encode_pub_file(pub_key, label, created_at);
+    std::fs::write(path, &data).map_err(VnmError::Io)
 }
 
-pub fn read_priv_file(path: &Path) -> Result<PrivKeyFile> {
+pub fn read_key_file(path: &Path) -> Result<KeyFileData> {
     let data = std::fs::read(path).map_err(VnmError::Io)?;
-    decode_priv(&data)
+    decode_key_file(&data)
 }
 
-/// Pretty-print a fingerprint as colon-separated hex bytes.
+pub fn read_pub_file(path: &Path) -> Result<PubFileData> {
+    let data = std::fs::read(path).map_err(VnmError::Io)?;
+    decode_pub_file(&data)
+}
+
+/// Pretty fingerprint: colon-separated hex bytes.
 pub fn fp_display(fp: &[u8; 8]) -> String {
     fp.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
-}
-
-/// Short display: first 4 bytes only.
-pub fn fp_short(fp: &[u8; 8]) -> String {
-    fp[..4].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
 }

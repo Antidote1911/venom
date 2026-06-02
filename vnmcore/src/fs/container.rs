@@ -31,9 +31,9 @@ use crate::container::{
     encode_header, decode_header, read_header_plaintext, kdf_params_for_profile,
     encode_password_slot, try_password_slot,
     encode_key_slot, try_key_slot,
-    slot_fingerprint, read_slot_fingerprint,
+    read_slot_fingerprint,
 };
-use crate::crypto::kem::{EncapKey, Seed, EK_SIZE, SEED_SIZE};
+use crate::crypto::hybrid_kem::{HybridPublicKey, HybridPrivateKey};
 use crate::storage::{SlotStore, VaultNode, NodeKind};
 use crate::storage::vault_fs::DirectoryBlock;
 use crate::container::header::HeaderPayload;
@@ -56,8 +56,8 @@ pub struct HiddenVolumeOptions<'a> {
 pub enum OpenCredential<'a> {
     /// Password (tries all password slots).
     Password(&'a [u8]),
-    /// ML-KEM private key seed (tries all key slots).
-    PrivateKey(&'a Seed),
+    /// Hybrid private key (X25519 + ML-KEM-1024, tries all key slots).
+    PrivateKey(&'a HybridPrivateKey),
 }
 
 /// Summary of one recipient slot (for display in the GUI).
@@ -282,8 +282,8 @@ impl VnmContainer {
             OpenCredential::Password(pw) => {
                 try_pw_slots(path, *pw, n_pw, cipher)
             }
-            OpenCredential::PrivateKey(seed) => {
-                try_key_slots(path, seed, n_key, cipher)
+            OpenCredential::PrivateKey(private) => {
+                try_key_slots(path, private, n_key, cipher)
             }
         };
 
@@ -367,13 +367,13 @@ impl VnmContainer {
     }
 
     /// Add a new ML-KEM (post-quantum) recipient using their public key.
-    pub fn add_key_recipient(&self, ek: &EncapKey) -> Result<()> {
+    pub fn add_key_recipient(&self, recipient: &HybridPublicKey) -> Result<()> {
         let raw = read_512_at(&self.path, 0)?;
         let (cipher, _, n_pw, n_key) = read_header_plaintext(&raw);
         if n_key as usize >= MAX_KEY_SLOTS {
             return Err(VnmError::InvalidFormat("max key recipients reached".into()));
         }
-        let slot = encode_key_slot(&self.k_master, ek, self.cipher)?;
+        let slot = encode_key_slot(&self.k_master, recipient, self.cipher)?;
         write_key_slot_raw(&self.path, n_key as usize, &slot)?;
         update_slot_counts(&self.path, n_pw, n_key + 1, &self.k_master, cipher, &raw)?;
         Ok(())
@@ -517,10 +517,10 @@ fn read_pw_slot_raw(path: &Path, i: usize) -> Result<[u8; PW_SLOT_SIZE]> {
 }
 
 /// Try all ML-KEM slots with the given seed.  Returns K_master on success.
-fn try_key_slots(path: &Path, seed: &Seed, n: u8, cipher: CipherAlgorithm) -> Option<[u8; 32]> {
+fn try_key_slots(path: &Path, private: &HybridPrivateKey, n: u8, cipher: CipherAlgorithm) -> Option<[u8; 32]> {
     for j in 0..n as usize {
         let slot = read_key_slot_raw(path, j).ok()?;
-        if let Some(k) = try_key_slot(&slot, seed, cipher) { return Some(k); }
+        if let Some(k) = try_key_slot(&slot, private, cipher) { return Some(k); }
     }
     None
 }
