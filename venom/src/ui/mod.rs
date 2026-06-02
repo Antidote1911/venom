@@ -5,6 +5,7 @@ mod create;
 mod mount;
 mod statusbar;
 pub mod recipients;
+pub mod key_manager;
 
 pub use create::CreateView;
 pub use mount::MountView;
@@ -23,6 +24,7 @@ pub fn render(app: &mut VenomApp, ctx: &egui::Context) {
                 Screen::Create     => create::render(app, ui),
                 Screen::Mount      => mount::render(app, ui),
                 Screen::Recipients => recipients::render(app, ui),
+                Screen::KeyManager => key_manager::render(app, ui),
             }
         });
 }

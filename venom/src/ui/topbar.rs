@@ -30,6 +30,28 @@ pub fn render(app: &mut VenomApp, ctx: &egui::Context) {
                     }
                 });
 
+                if ui.button(
+                    RichText::new("🗝 Keys")
+                        .color(if app.screen == Screen::KeyManager {
+                            egui::Color32::from_rgb(180, 140, 255)
+                        } else {
+                            egui::Color32::GRAY
+                        })
+                ).clicked() {
+                    app.screen = Screen::KeyManager;
+                    app.clear_status();
+                }
+
+                // Key count badge
+                let n_keys = app.keys.entries.len();
+                if n_keys > 0 {
+                    ui.label(
+                        RichText::new(format!("{n_keys}"))
+                            .small()
+                            .color(egui::Color32::from_rgb(160, 120, 220)),
+                    );
+                }
+
                 // Right side: mounted vault count badge
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mounted_count = app.mounted.iter().filter(|mv| {

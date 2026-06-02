@@ -1,5 +1,6 @@
 mod app;
 mod recent;
+mod keystore;
 mod ui;
 
 fn main() -> eframe::Result<()> {
