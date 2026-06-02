@@ -1,0 +1,11 @@
+/home/antidote/Documents/venom/target/release/deps/enum_map-6885695628bd037a.d: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/enum_map_impls.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/internal.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/iter.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/serde.rs
+
+/home/antidote/Documents/venom/target/release/deps/libenum_map-6885695628bd037a.rlib: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/enum_map_impls.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/internal.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/iter.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/serde.rs
+
+/home/antidote/Documents/venom/target/release/deps/libenum_map-6885695628bd037a.rmeta: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/enum_map_impls.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/internal.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/iter.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/serde.rs
+
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/lib.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/enum_map_impls.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/internal.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/iter.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enum-map-2.7.3/src/serde.rs:

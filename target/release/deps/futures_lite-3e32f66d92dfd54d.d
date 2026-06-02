@@ -1,0 +1,11 @@
+/home/antidote/Documents/venom/target/release/deps/futures_lite-3e32f66d92dfd54d.d: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/future.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/prelude.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/stream.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/io.rs
+
+/home/antidote/Documents/venom/target/release/deps/libfutures_lite-3e32f66d92dfd54d.rlib: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/future.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/prelude.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/stream.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/io.rs
+
+/home/antidote/Documents/venom/target/release/deps/libfutures_lite-3e32f66d92dfd54d.rmeta: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/future.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/prelude.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/stream.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/io.rs
+
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/lib.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/future.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/prelude.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/stream.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/futures-lite-1.13.0/src/io.rs:

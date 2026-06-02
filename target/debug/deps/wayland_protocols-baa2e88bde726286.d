@@ -1,0 +1,10 @@
+/home/antidote/Documents/venom/target/debug/deps/wayland_protocols-baa2e88bde726286.d: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/protocol_macro.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/ext.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/wp.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/xdg.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/xwayland.rs
+
+/home/antidote/Documents/venom/target/debug/deps/libwayland_protocols-baa2e88bde726286.rmeta: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/protocol_macro.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/ext.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/wp.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/xdg.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/xwayland.rs
+
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/lib.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/protocol_macro.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/ext.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/wp.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/xdg.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-protocols-0.32.12/src/xwayland.rs:

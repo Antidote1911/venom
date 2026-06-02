@@ -1,0 +1,11 @@
+/home/antidote/Documents/venom/target/release/deps/socket2-4f43041d9fddc991.d: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sockaddr.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/socket.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sockref.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sys/unix.rs
+
+/home/antidote/Documents/venom/target/release/deps/libsocket2-4f43041d9fddc991.rlib: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sockaddr.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/socket.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sockref.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sys/unix.rs
+
+/home/antidote/Documents/venom/target/release/deps/libsocket2-4f43041d9fddc991.rmeta: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sockaddr.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/socket.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sockref.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sys/unix.rs
+
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/lib.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sockaddr.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/socket.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sockref.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/socket2-0.4.10/src/sys/unix.rs:

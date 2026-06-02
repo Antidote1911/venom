@@ -1,0 +1,10 @@
+/home/antidote/Documents/venom/target/release/deps/zvariant_derive-526896bcae3e6df3.d: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/dict.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/type.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/utils.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/value.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/../README.md
+
+/home/antidote/Documents/venom/target/release/deps/libzvariant_derive-526896bcae3e6df3.so: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/dict.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/type.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/utils.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/value.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/../README.md
+
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/lib.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/dict.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/type.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/utils.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/value.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-4.2.0/src/../README.md:

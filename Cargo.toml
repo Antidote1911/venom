@@ -1,0 +1,49 @@
+[workspace]
+members = ["vnmcore", "venom"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Venom Project"]
+license = "MIT"
+
+[workspace.dependencies]
+# Crypto
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = { version = "1.7", features = ["derive"] }
+subtle = "2.5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Utilities
+thiserror = "1"
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+hex = "0.4"
+sha2 = "0.10"
+hmac = "0.12"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# GUI
+eframe = "0.28"
+egui = "0.28"
+egui_extras = "0.28"
+
+# FUSE (Linux/macOS)
+fuser = "0.14"
+
+# File dialog
+rfd = "0.14"
+
+# Bytes serialization
+serde_bytes = "0.11"

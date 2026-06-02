@@ -1,0 +1,10 @@
+/home/antidote/Documents/venom/target/debug/deps/zvariant_derive-019ca92fc8bf6091.d: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/dict.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/type.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/utils.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/value.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/../README.md
+
+/home/antidote/Documents/venom/target/debug/deps/libzvariant_derive-019ca92fc8bf6091.so: /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/lib.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/dict.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/type.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/utils.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/value.rs /home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/../README.md
+
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/lib.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/dict.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/type.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/utils.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/value.rs:
+/home/antidote/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zvariant_derive-3.15.2/src/../README.md:
