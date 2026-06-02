@@ -75,7 +75,7 @@ impl VnmContainer {
         let total_slots = (total_size_bytes - HEADER_REGION_SIZE) / SLOT_SIZE as u64;
 
         // Determine outer and hidden slot boundaries.
-        let (outer_limit, hidden_slots) = match &hidden {
+        let (outer_limit, _hidden_slots) = match &hidden {
             None => (total_slots, 0u64),
             Some(h) => {
                 let h_slots = ((h.size_bytes + SLOT_SIZE as u64 - 1) / SLOT_SIZE as u64)

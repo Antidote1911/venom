@@ -80,51 +80,6 @@ impl Drop for HeaderPayload {
 }
 
 /// Encode a header into 512 bytes ready to write to disk.
-pub fn encode_header(
-    payload: &HeaderPayload,
-    is_hidden: bool,
-) -> Result<[u8; HEADER_SIZE]> {
-    let mut buf = [0u8; HEADER_SIZE];
-
-    // Salt
-    let mut salt = [0u8; SALT_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
-    buf[0..SALT_LEN].copy_from_slice(&salt);
-
-    // Plaintext KDF params + cipher (before encrypted region)
-    buf[32] = payload.cipher as u8;
-    buf[33..37].copy_from_slice(&payload.kdf.memory_kib.to_le_bytes());
-    buf[37..41].copy_from_slice(&payload.kdf.iterations.to_le_bytes());
-    buf[41..45].copy_from_slice(&payload.kdf.parallelism.to_le_bytes());
-
-    // Derive the header encryption key from password+salt (kdf stores salt hex internally)
-    let mut kdf_with_salt = payload.kdf.clone();
-    kdf_with_salt.salt = hex::encode(&salt);
-    let dk = derive_key(&[], &kdf_with_salt) // password placeholder, used externally
-        .map_err(|e| VnmError::KdfError(e.to_string()))?;
-    let _ = dk; // actual derive happens in encode_header_with_key
-
-    // Body (plaintext)
-    let mut body = [0u8; BODY_SIZE];
-    body[0..4].copy_from_slice(MAGIC);
-    body[4..8].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
-    body[8..40].copy_from_slice(&payload.master_key);
-    body[40..48].copy_from_slice(&payload.total_slots.to_le_bytes());
-    body[48..56].copy_from_slice(&payload.outer_limit.to_le_bytes());
-    body[56..64].copy_from_slice(&payload.root_slot.to_le_bytes());
-    body[64..72].copy_from_slice(&payload.created_at.to_le_bytes());
-    body[72..136].copy_from_slice(&payload.label);
-    // [136..439] stays zero (reserved)
-
-    // We need the actual derived key from the password — caller provides it via
-    // encode_header_with_password which is the real public API.
-    // This internal version encodes the body but doesn't encrypt — use the
-    // with_password variant below.
-    let _ = body; // returned to caller for use in encode_header_with_password
-
-    Err(VnmError::InvalidFormat("use encode_header_with_password".into()))
-}
-
 /// Encode + encrypt a header with the given password.
 pub fn encode_header_with_password(
     payload: &HeaderPayload,

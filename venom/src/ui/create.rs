@@ -174,7 +174,7 @@ pub fn render(app: &mut VenomApp, ui: &mut egui::Ui) {
                                     app.create_view.hidden_size_input.trim().parse().unwrap_or(0);
                             }
 
-                            let h_max = app.create_view.size_mb.saturating_sub(2);
+                            let _h_max = app.create_view.size_mb.saturating_sub(2);
                             if app.create_view.hidden_size_mb >= app.create_view.size_mb {
                                 ui.label(RichText::new(format!("Must be < {} MB (outer size).", app.create_view.size_mb)).small().color(theme::ERROR));
                             } else if app.create_view.hidden_size_mb > 0 {

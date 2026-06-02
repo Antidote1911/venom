@@ -41,7 +41,7 @@ pub mod driver {
 
     // ── Inode ↔ slot mapping ──────────────────────────────────────────────────
 
-    struct InodeMap {
+    pub(crate) struct InodeMap {
         slot_to_ino: HashMap<u64, u64>,
         ino_to_slot: HashMap<u64, u64>,
         next_ino: u64,
@@ -81,7 +81,7 @@ pub mod driver {
 
     // ── Open-file cache ───────────────────────────────────────────────────────
 
-    struct OpenFile {
+    pub(crate) struct OpenFile {
         ino:   u64,
         slot:  u64,
         data:  Vec<u8>,

@@ -3,8 +3,6 @@ use crate::app::state::{MountStatus, VenomApp, Screen};
 use crate::recent::RecentVault;
 use super::theme;
 
-#[derive(Default)]
-pub struct VaultListView;
 
 pub fn render(app: &mut VenomApp, ui: &mut Ui) {
     ui.add_space(8.0);
@@ -178,10 +176,17 @@ fn vault_card(
                                     RichText::new(title).strong().size(15.0),
                                 );
                                 ui.label(
-                                    RichText::new(format!("  read-write"))
+                                    RichText::new("  read-write")
                                         .small()
                                         .color(theme::SUCCESS),
                                 );
+                                if *is_hidden {
+                                    ui.label(
+                                        RichText::new("  🔐 hidden")
+                                            .small()
+                                            .color(egui::Color32::from_rgb(180, 120, 255)),
+                                    );
+                                }
                             });
                             ui.add_space(2.0);
                             mono_row(ui, "vault", vault_path);
