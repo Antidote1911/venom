@@ -88,7 +88,7 @@ fn write_and_read_file_node() {
     let content = b"Hello, Venom!".to_vec();
     let file = VaultNode::File(FileBlock {
         kind: NodeKind::File, total_size: content.len() as u64,
-        continuation_slots: vec![], data: content.clone(),
+        next_slot: None, data: content.clone(),
     });
     let slot = c.write_node(&file).unwrap();
     match c.read_node(slot).unwrap() {
@@ -108,7 +108,7 @@ fn data_survives_reopen() {
     let content = b"persistent".to_vec();
     let file = VaultNode::File(FileBlock {
         kind: NodeKind::File, total_size: content.len() as u64,
-        continuation_slots: vec![], data: content.clone(),
+        next_slot: None, data: content.clone(),
     });
     let slot = c.write_node(&file).unwrap();
     c.flush().unwrap();
@@ -176,7 +176,7 @@ fn hidden_and_outer_volumes_independent() {
     let outer_data = b"outer secret".to_vec();
     let outer_file = VaultNode::File(FileBlock {
         kind: NodeKind::File, total_size: outer_data.len() as u64,
-        continuation_slots: vec![], data: outer_data.clone(),
+        next_slot: None, data: outer_data.clone(),
     });
     let outer_slot = outer.write_node(&outer_file).unwrap();
     outer.flush().unwrap();
@@ -186,7 +186,7 @@ fn hidden_and_outer_volumes_independent() {
     let hidden_data = b"hidden secret".to_vec();
     let hidden_file = VaultNode::File(FileBlock {
         kind: NodeKind::File, total_size: hidden_data.len() as u64,
-        continuation_slots: vec![], data: hidden_data.clone(),
+        next_slot: None, data: hidden_data.clone(),
     });
     let hidden_slot = hidden_c.write_node(&hidden_file).unwrap();
     hidden_c.flush().unwrap();

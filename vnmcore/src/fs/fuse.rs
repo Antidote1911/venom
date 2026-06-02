@@ -171,9 +171,13 @@ pub mod driver {
 
         pub fn load_file_data(&self, f: &FileBlock) -> Result<Vec<u8>, i32> {
             let mut data = f.data.clone();
-            for &cont_slot in &f.continuation_slots {
-                match self.container.read_node(cont_slot) {
-                    Ok(VaultNode::File(c)) => data.extend_from_slice(&c.data),
+            let mut next = f.next_slot;
+            while let Some(slot) = next {
+                match self.container.read_node(slot) {
+                    Ok(VaultNode::File(c)) => {
+                        data.extend_from_slice(&c.data);
+                        next = c.next_slot;
+                    }
                     _ => return Err(EIO),
                 }
             }
@@ -182,33 +186,42 @@ pub mod driver {
         }
 
         fn persist_file_data(&self, first_slot: u64, existing: &FileBlock, new_data: Vec<u8>) -> Result<(), i32> {
-            // Free old continuation slots
-            for &cont_slot in &existing.continuation_slots {
-                self.container.free_node(cont_slot);
-                self.inodes.write().unwrap().remove_slot(cont_slot);
+            // Free the old continuation chain.
+            let mut next = existing.next_slot;
+            while let Some(slot) = next {
+                next = match self.container.read_node(slot) {
+                    Ok(VaultNode::File(c)) => {
+                        let n = c.next_slot;
+                        self.container.free_node(slot);
+                        self.inodes.write().unwrap().remove_slot(slot);
+                        n
+                    }
+                    _ => None,
+                };
             }
 
             let total_size = new_data.len() as u64;
-            let mut chunks = new_data.chunks(FILE_DATA_CHUNK);
-            let first_chunk = chunks.next().unwrap_or(&[]).to_vec();
-            let mut cont_slots: Vec<u64> = vec![];
+            let chunks: Vec<&[u8]> = new_data.chunks(FILE_DATA_CHUNK).collect();
 
-            for chunk in chunks {
-                let cont = VaultNode::File(FileBlock {
-                    kind: NodeKind::FileContinuation,
+            // Build the new chain back-to-front so each block already knows its
+            // successor's slot before being written.
+            let mut tail_slot: Option<u64> = None;
+            for chunk in chunks.iter().skip(1).rev() {
+                let node = VaultNode::File(FileBlock {
+                    kind:       NodeKind::FileContinuation,
                     total_size: 0,
-                    continuation_slots: vec![],
-                    data: chunk.to_vec(),
+                    next_slot:  tail_slot,
+                    data:       chunk.to_vec(),
                 });
-                let s = self.container.write_node(&cont).map_err(|_| EIO)?;
-                cont_slots.push(s);
+                tail_slot = Some(self.container.write_node(&node).map_err(|_| EIO)?);
             }
 
+            let first_data = chunks.first().map(|c| c.to_vec()).unwrap_or_default();
             self.container.update_node(first_slot, &VaultNode::File(FileBlock {
-                kind: NodeKind::File,
+                kind:       NodeKind::File,
                 total_size,
-                continuation_slots: cont_slots,
-                data: first_chunk,
+                next_slot:  tail_slot,
+                data:       first_data,
             })).map_err(|_| EIO)
         }
 
@@ -285,7 +298,7 @@ pub mod driver {
 
         pub fn op_create(&mut self, parent: u64, name: &str) -> Result<(u64, u64), i32> {
             let p_slot = self.slot_of_ino(parent).ok_or(ENOENT)?;
-            let empty  = VaultNode::File(FileBlock { kind: NodeKind::File, total_size: 0, continuation_slots: vec![], data: vec![] });
+            let empty  = VaultNode::File(FileBlock { kind: NodeKind::File, total_size: 0, next_slot: None, data: vec![] });
             let slot   = self.container.write_node(&empty).map_err(|_| EIO)?;
             let entry  = DirEntry { name: name.to_string(), slot, kind: NodeKind::File };
             if let Err(e) = self.dir_add_entry(p_slot, entry) {
@@ -301,10 +314,19 @@ pub mod driver {
             let p_slot  = self.slot_of_ino(parent).ok_or(ENOENT)?;
             let removed = self.dir_remove_entry(p_slot, name)?;
             self.open_files.retain(|_, of| of.slot != removed);
+            // Free the entire continuation chain.
             if let Ok(VaultNode::File(f)) = self.container.read_node(removed) {
-                for &c in &f.continuation_slots {
-                    self.container.free_node(c);
-                    self.inodes.write().unwrap().remove_slot(c);
+                let mut next = f.next_slot;
+                while let Some(slot) = next {
+                    next = match self.container.read_node(slot) {
+                        Ok(VaultNode::File(c)) => {
+                            let n = c.next_slot;
+                            self.container.free_node(slot);
+                            self.inodes.write().unwrap().remove_slot(slot);
+                            n
+                        }
+                        _ => None,
+                    };
                 }
             }
             self.container.free_node(removed);
@@ -586,7 +608,7 @@ pub mod driver {
             let node = VaultNode::File(FileBlock {
                 kind: NodeKind::File,
                 total_size: content.len() as u64,
-                continuation_slots: vec![],
+                next_slot: None,
                 data: content.to_vec(),
             });
             let slot = c.write_node(&node).unwrap();
@@ -605,8 +627,12 @@ pub mod driver {
             match c.read_node(slot).unwrap() {
                 VaultNode::File(f) => {
                     let mut data = f.data.clone();
-                    for &s in &f.continuation_slots {
-                        if let Ok(VaultNode::File(c2)) = c.read_node(s) { data.extend_from_slice(&c2.data); }
+                    let mut next = f.next_slot;
+                    while let Some(s) = next {
+                        if let Ok(VaultNode::File(c2)) = c.read_node(s) {
+                            data.extend_from_slice(&c2.data);
+                            next = c2.next_slot;
+                        } else { break; }
                     }
                     data.truncate(f.total_size as usize);
                     data
@@ -684,6 +710,20 @@ pub mod driver {
             fuse.op_create(ROOT_INO, "bye.txt").unwrap();
             fuse.op_unlink(ROOT_INO, "bye.txt").unwrap();
             assert_eq!(fuse.op_lookup(ROOT_INO, "bye.txt").unwrap_err(), ENOENT);
+            std::fs::remove_file(&path).ok();
+        }
+
+        #[test] fn large_file_linked_chain_roundtrip() {
+            // 75 KB — spans 3 slots (30 KB each). Verifies the linked-list
+            // implementation handles multi-slot files without "plaintext too large".
+            let (_c, mut fuse, path) = setup("large_file");
+            let payload: Vec<u8> = (0u32..75_000).map(|i| (i * 7 + 13) as u8).collect();
+            let (ino, fh) = fuse.op_create(ROOT_INO, "big.bin").unwrap();
+            fuse.op_write(ino, fh, 0, &payload).unwrap();
+            fuse.op_release(fh).unwrap();
+            let fh2 = fuse.op_open(ino).unwrap();
+            let back = fuse.op_read(ino, fh2, 0, payload.len() as u32 + 1).unwrap();
+            assert_eq!(back, payload);
             std::fs::remove_file(&path).ok();
         }
 
