@@ -272,7 +272,10 @@ pub fn render(app: &mut VenomApp, ui: &mut egui::Ui) {
 
         ui.horizontal(|ui| {
             let v = &app.create_view;
-            let pw_ok = !v.password.is_empty() && v.password == v.password_confirm;
+            // Password is optional when at least one key recipient is selected.
+            let has_recipients = !v.selected_recipients.is_empty();
+            let pw_ok = has_recipients                          // key-only: no password needed
+                || (!v.password.is_empty() && v.password == v.password_confirm);
             let hid_ok = !v.hidden_enabled || (
                 !v.hidden_password.is_empty()
                     && v.hidden_password == v.hidden_password_confirm

@@ -72,11 +72,12 @@ impl VenomApp {
             self.set_status("Container size must be > 0 MB.", true);
             return;
         }
-        if v.password.is_empty() {
-            self.set_status("Password is required.", true);
+        let has_recipients = !v.selected_recipients.is_empty();
+        if v.password.is_empty() && !has_recipients {
+            self.set_status("Enter a password or select at least one key recipient.", true);
             return;
         }
-        if v.password != v.password_confirm {
+        if !v.password.is_empty() && v.password != v.password_confirm {
             self.set_status("Passwords do not match.", true);
             return;
         }

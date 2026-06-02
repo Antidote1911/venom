@@ -229,19 +229,23 @@ impl VnmContainer {
         if let Some(ref s) = label {
             let b = s.as_bytes(); lbl[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
         }
+        // An empty outer_password means "key-only access" — no password slot is created.
+        let has_password = !outer_password.is_empty();
         let outer_payload = HeaderPayload {
             cipher, kdf_profile: kdf_id,
-            num_password_slots: 1, num_key_slots: 0,
+            num_password_slots: u8::from(has_password), num_key_slots: 0,
             outer_slots, hidden_start: 0,
             root_slot: OUTER_ROOT_SLOT, created_at: now, label: lbl,
         };
         let outer_hdr = encode_header(&outer_payload, &k_outer, false)?;
         write_bytes_at(path, 0, &outer_hdr)?;
 
-        // 4. Write password recipient slot for outer volume
-        let pw_slot = encode_password_slot(&k_outer, outer_password, kdf_id, cipher)?;
-        write_recipient_slot(path, 0, &pw_slot)?;
-        // Fill remaining password slots + all key slots with random bytes (already done by fill)
+        // 4. Write password recipient slot (only when a password is provided)
+        if has_password {
+            let pw_slot = encode_password_slot(&k_outer, outer_password, kdf_id, cipher)?;
+            write_recipient_slot(path, 0, &pw_slot)?;
+        }
+        // Remaining slots stay as random bytes (already filled in step 1)
 
         // 5. Init outer slot store
         let outer_store = open_store(path, k_outer, cipher, 0, outer_slots, OUTER_ALLOC_SLOT)?;
