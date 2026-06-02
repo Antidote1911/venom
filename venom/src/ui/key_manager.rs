@@ -58,7 +58,7 @@ fn key_list(app: &mut VenomApp, ui: &mut Ui) {
             .fill(theme::CARD).stroke(egui::Stroke::new(1.0, theme::BORDER))
             .rounding(Rounding::same(8.0)).inner_margin(Margin::same(16.0))
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
+                ui.set_max_width(ui.available_width());
                 ui.vertical_centered(|ui| {
                     ui.label(RichText::new("🗝").size(32.0));
                     ui.add_space(6.0);
@@ -129,7 +129,7 @@ fn key_card(
         .fill(bg).stroke(egui::Stroke::new(1.5, border))
         .rounding(Rounding::same(8.0)).inner_margin(Margin::same(10.0))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            ui.set_max_width(ui.available_width());
 
             ui.horizontal(|ui| {
                 let lock_icon = if entry.is_protected { "🔒🔑" } else { "🔑" };
@@ -192,7 +192,7 @@ fn generate_panel(app: &mut VenomApp, ui: &mut Ui) {
         .stroke(egui::Stroke::new(1.0, Color32::from_rgb(40, 80, 40)))
         .rounding(Rounding::same(8.0)).inner_margin(Margin::same(12.0))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            ui.set_max_width(ui.available_width());
             ui.label(RichText::new("X25519 + ML-KEM-1024 (FIPS 203, NIST Cat. 5)").small().color(theme::SUCCESS));
             ui.label(RichText::new("Both keys are independent random values.").small().color(theme::TEXT_MUTED));
             ui.add_space(8.0);
@@ -275,7 +275,7 @@ fn import_panel(app: &mut VenomApp, ui: &mut Ui) {
         .fill(theme::CARD).stroke(egui::Stroke::new(1.0, theme::BORDER))
         .rounding(Rounding::same(8.0)).inner_margin(Margin::same(12.0))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            ui.set_max_width(ui.available_width());
             if ui.add(
                 egui::Button::new("📥 Import .key file").min_size(Vec2::new(f32::INFINITY, 28.0))
             ).on_hover_text("Import a keypair from a backup or another machine").clicked() {
@@ -313,7 +313,7 @@ fn passphrase_panel(app: &mut VenomApp, ui: &mut Ui) {
         .fill(Color32::from_rgb(26, 20, 42)).stroke(purple_border)
         .rounding(Rounding::same(8.0)).inner_margin(Margin::same(12.0))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            ui.set_max_width(ui.available_width());
 
             if entry.is_protected {
                 // ── Remove protection ──────────────────────────────────────

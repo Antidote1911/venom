@@ -147,7 +147,7 @@ fn vault_card(
         .rounding(Rounding::same(10.0))
         .inner_margin(Margin::same(14.0))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            ui.set_max_width(ui.available_width());
             ui.horizontal(|ui| {
                 // ── Left: status icon + info ──────────────────────────────────
                 ui.vertical(|ui| {
@@ -337,7 +337,7 @@ fn recent_row(
         .rounding(Rounding::same(8.0))
         .inner_margin(Margin::symmetric(12.0, 8.0))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            ui.set_max_width(ui.available_width());
             ui.horizontal(|ui| {
                 // ── Info ──────────────────────────────────────────────────────
                 ui.vertical(|ui| {

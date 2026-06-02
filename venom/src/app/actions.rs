@@ -4,17 +4,27 @@ use vnmcore::fs::container::{VnmContainer, HiddenVolumeOptions};
 use crate::app::state::{MountStatus, MountedVault, Screen, VenomApp};
 use crate::recent::read_cipher_from_bootstrap;
 
+/// Owned credential passed to the mount background thread.
+enum OwnedCredential {
+    Password(Vec<u8>),
+    PrivateKey(Box<vnmcore::HybridPrivateKey>),
+}
+
 /// Background thread that opens the container, signals Mounted, then blocks on the
 /// OS-level mount. Works on Linux/macOS (FUSE) and Windows (WinFSP).
 fn mount_thread(
     status:     Arc<Mutex<MountStatus>>,
     vault_path: String,
     mountpoint: String,
-    password:   Vec<u8>,
+    credential: OwnedCredential,
     ctx:        egui::Context,
 ) {
     use vnmcore::OpenCredential;
-    match VnmContainer::open(&vault_path, OpenCredential::Password(&password)) {
+    let open_result = match &credential {
+        OwnedCredential::Password(pw)   => VnmContainer::open(&vault_path, OpenCredential::Password(pw)),
+        OwnedCredential::PrivateKey(key) => VnmContainer::open(&vault_path, OpenCredential::PrivateKey(key)),
+    };
+    match open_result {
         Ok(c) => {
             *status.lock().unwrap() = MountStatus::Mounted {
                 label:      c.label.clone(),
@@ -182,10 +192,45 @@ impl VenomApp {
             self.set_status("Container path and mountpoint are required.", true);
             return;
         }
-        if v.password.is_empty() {
-            self.set_status("Password is required.", true);
-            return;
-        }
+        // Validate credential
+        let credential: OwnedCredential = if v.use_key {
+            match v.selected_key_fp {
+                None => {
+                    self.set_status("Select a keypair from the list.", true);
+                    return;
+                }
+                Some(fp) => {
+                    let is_protected = self.keys.entries.iter()
+                        .find(|e| e.fingerprint == fp)
+                        .map(|e| e.is_protected)
+                        .unwrap_or(false);
+                    let key = if is_protected {
+                        let pw = v.key_passphrase.as_bytes().to_vec();
+                        if pw.is_empty() {
+                            self.set_status("Enter the keypair passphrase.", true);
+                            return;
+                        }
+                        match self.keys.get_key_with_passphrase(&fp, &pw) {
+                            Ok(k)  => k,
+                            Err(e) => { self.set_status(format!("Key error: {e}"), true); return; }
+                        }
+                    } else {
+                        match self.keys.get_key(&fp) {
+                            Some(k) => k,
+                            None    => { self.set_status("Key not found in store.", true); return; }
+                        }
+                    };
+                    OwnedCredential::PrivateKey(Box::new(key))
+                }
+            }
+        } else {
+            if v.password.is_empty() {
+                self.set_status("Enter a password or switch to Private key mode.", true);
+                return;
+            }
+            OwnedCredential::Password(v.password.as_bytes().to_vec())
+        };
+
         if self.mounted.iter().any(|mv| mv.mountpoint == v.mountpoint) {
             self.set_status(format!("'{}' is already in use as a mountpoint.", v.mountpoint), true);
             return;
@@ -195,13 +240,12 @@ impl VenomApp {
         let st_thread  = Arc::clone(&status);
         let vault_path = v.vault_path.clone();
         let mountpoint = v.mountpoint.clone();
-        let password   = v.password.as_bytes().to_vec();
         let ctx        = self.egui_ctx.clone();
 
         std::thread::Builder::new()
             .name(format!("vnm-mount:{mountpoint}"))
             .spawn(move || {
-                mount_thread(st_thread, vault_path, mountpoint, password, ctx);
+                mount_thread(st_thread, vault_path, mountpoint, credential, ctx);
             })
             .expect("failed to spawn mount thread");
 

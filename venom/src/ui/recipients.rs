@@ -33,7 +33,7 @@ pub fn render(app: &mut VenomApp, ui: &mut egui::Ui) {
                 .rounding(egui::Rounding::same(6.0))
                 .inner_margin(Margin::symmetric(10.0, 6.0))
                 .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
+                    ui.set_max_width(ui.available_width());
                     ui.horizontal(|ui| {
                         if r.is_key {
                             let fp = hex_fp(&r.fingerprint);
