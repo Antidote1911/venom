@@ -1,161 +1,148 @@
-//! On-disk header format for Venom containers — version 2.
+//! On-disk container header — version 3.
 //!
-//! ## Layout (512 bytes per header)
+//! ## Layout (512 bytes)
 //!
-//!   [0..64]    Salt — 64 random bytes, stored in plaintext.
-//!              Needed to derive the header decryption key before decryption.
-//!   [64]       cipher_id — 0 = ChaCha20-Poly1305, 1 = AES-256-GCM
-//!   [65]       kdf_profile — 0 = interactive, 1 = sensitive
-//!              Stores only a profile ID; exact Argon2id parameters are
-//!              hardcoded per profile and NOT exposed in plaintext.
-//!   [66..78]   reserved (12 random bytes — padding, not interpreted)
-//!   [78..90]   nonce — 12 bytes for the AEAD below
-//!   [90..512]  encrypted body — 406 bytes plaintext + 16-byte AEAD tag
+//!   [0..64]    salt (64 bytes, plaintext — for Argon2id / key derivation)
+//!   [64]       cipher_id (0=ChaCha20-Poly1305, 1=AES-256-GCM)
+//!   [65]       kdf_profile_id (0=interactive, 1=sensitive)
+//!   [66]       num_password_slots (u8, plaintext — max MAX_PASSWORD_SLOTS)
+//!   [67]       num_key_slots (u8, plaintext — max MAX_KEY_SLOTS)
+//!   [68..80]   nonce (12 bytes, for AEAD below)
+//!   [80..512]  encrypt_block(K_master, cipher, AAD, header_body)
+//!              = 36 (VNMB) + 396 (body) + 16 (tag) = 448 bytes — fits in 432 bytes?
+//!              Let's compute: 512 - 80 = 432 bytes available for encrypted block.
+//!              encrypt_block output = 20 + plaintext + 16 tag = 36 + plaintext.
+//!              max plaintext = 432 - 36 = 396 bytes.
+//!              Header body = 396 bytes.
 //!
-//! ## Header positions in the file
+//! ## Header body plaintext (396 bytes)
 //!
-//!   Byte 0     : outer header (always present)
-//!   file_end−512 : hidden header (or random bytes if no hidden volume)
+//!   [0..4]    magic "VNM3"
+//!   [4..8]    version u32 LE = 3
+//!   [8..16]   data_area_offset u64 LE (fixed: HEADER_REGION + RECIPIENT_AREA_SIZE)
+//!   [16..24]  outer_slots u64 LE
+//!             outer: number of outer-only data slots (claimed as full capacity)
+//!             hidden: number of hidden data slots
+//!   [24..32]  hidden_start u64 LE (outer: 0; hidden: first slot index of hidden volume)
+//!   [32..40]  root_slot u64 LE
+//!   [40..48]  created_at u64 LE
+//!   [48..112] label [u8; 64]
+//!   [112..396] reserved [u8; 284]
 //!
-//! Keeping the hidden header at the END of the file (rather than at a fixed
-//! offset like 512) means an attacker cannot prove a hidden volume exists
-//! by inspecting a known offset.
+//! ## Header positions
 //!
-//! ## Encrypted body plaintext (406 bytes)
+//!   Outer header:  byte 0
+//!   Hidden header: file_end - 512 (or random bytes if no hidden volume)
 //!
-//!   [0..4]    magic   b"VNM2"  (version 2)
-//!   [4..8]    version u32 LE
-//!   [8..40]   master_key [u8; 32]
-//!   [40..48]  total_slots u64 LE
-//!             outer: number of outer-only slots (does NOT include hidden slots)
-//!             hidden: number of hidden slots
-//!   [48..56]  hidden_start u64 LE
-//!             outer: 0 (unused)
-//!             hidden: first slot index belonging to hidden volume
-//!   [56..64]  root_slot u64 LE
-//!   [64..72]  created_at u64 LE (Unix seconds)
-//!   [72..136] label [u8; 64] (UTF-8, null-padded)
-//!   [136..406] reserved [u8; 270]
+//! ## Recipient area (immediately after HEADER_REGION_SIZE = 1024)
 //!
-//! ## AAD
-//!   outer  header: b"vnm:outer:v2"
-//!   hidden header: b"vnm:hidden:v2"
+//!   [1024 .. 1024 + MAX_PASSWORD_SLOTS * PW_SLOT_SIZE]   password slots
+//!   [... .. ... + MAX_KEY_SLOTS * KEY_SLOT_SIZE]          ML-KEM slots
+//!   DATA_AREA_OFFSET = 1024 + RECIPIENT_AREA_SIZE         first data slot
 
 use rand::RngCore;
 use zeroize::Zeroize;
 
 use crate::{Result, VnmError};
-use crate::container::{CipherAlgorithm, KdfParams};
+use crate::container::{CipherAlgorithm, kdf_params_for_profile};
 use crate::crypto::{derive_key, encrypt_block, decrypt_block};
 
 pub const HEADER_SIZE:        usize = 512;
-pub const HEADER_REGION_SIZE: u64   = 1024; // offset 0-511 = outer; 512-1023 = random/reserved
+pub const HEADER_REGION_SIZE: u64   = 1024;
 pub const SLOT_SIZE:          usize = 32_768;
 
-pub const MAGIC:          &[u8; 4] = b"VNM2";
-pub const FORMAT_VERSION: u32      = 2;
+// Recipient area constants (fixed layout — no need to move data when adding/removing recipients)
+pub const MAX_PASSWORD_SLOTS: usize = 8;
+pub const MAX_KEY_SLOTS:      usize = 8;
+pub const PW_SLOT_SIZE:       usize = super::recipient::PW_SLOT_SIZE;   // 101
+pub const KEY_SLOT_SIZE:      usize = super::recipient::KEY_SLOT_SIZE;  // 1644
+pub const RECIPIENT_AREA_SIZE: usize = MAX_PASSWORD_SLOTS * PW_SLOT_SIZE + MAX_KEY_SLOTS * KEY_SLOT_SIZE;
+// = 8 * 101 + 8 * 1644 = 808 + 13152 = 13960
 
-const SALT_LEN:    usize = 64;  // was 32 — now 64 to match VeraCrypt
-const NONCE_OFFSET:usize = 78;
-const BODY_OFFSET: usize = 90;
-const BODY_SIZE:   usize = 406; // plaintext bytes in body (= 512 - 90 - 16 tag)
+/// Byte offset where slot 0 starts.
+pub const DATA_AREA_OFFSET: u64 = HEADER_REGION_SIZE + RECIPIENT_AREA_SIZE as u64;
+// = 1024 + 13960 = 14984
 
-const AAD_OUTER:  &[u8] = b"vnm:outer:v2";
-const AAD_HIDDEN: &[u8] = b"vnm:hidden:v2";
+pub const MAGIC:          &[u8; 4] = b"VNM3";
+pub const FORMAT_VERSION: u32      = 3;
 
-/// Hardcoded Argon2id parameters per profile.
-/// Stored as an opaque 1-byte profile ID in the header — exact values are
-/// NOT exposed in plaintext, reducing an attacker's brute-force efficiency.
-pub fn kdf_params_for_profile(profile_id: u8) -> KdfParams {
-    match profile_id {
-        1 => KdfParams { memory_kib: 262_144, iterations: 4, parallelism: 4, salt: String::new() },
-        _ => KdfParams { memory_kib:  65_536, iterations: 3, parallelism: 4, salt: String::new() },
-    }
-}
+const SALT_LEN:     usize = 64;
+const BODY_OFFSET:  usize = 68;   // after salt(64) + cipher(1) + profile(1) + n_pw(1) + n_key(1) = 68
+const BODY_PLAINTEXT: usize = 396; // = 512 - 68 - 36 (VNMB) = 408? let me recount
 
-pub fn profile_id_for_str(profile: &str) -> u8 {
-    if profile == "sensitive" { 1 } else { 0 }
-}
+// encrypt_block output = 4(magic)+4(ver)+12(nonce)+plaintext+16(tag) = 36+plaintext
+// Available: 512 - 68 = 444 bytes for the encrypted block output
+// → max plaintext = 444 - 36 = 408 bytes
+// We use 396 bytes plaintext (body) → output = 432 bytes ✓ (fits in 444)
+pub(crate) const BODY_LEN: usize = 396;
+/// Size of the VNMB-encrypted header body on disk (36 VNMB header + 396 plaintext + 16 tag).
+pub(crate) const ENC_BODY_SIZE: usize = 36 + BODY_LEN; // = 432
 
-/// Decoded content of a container header.
+const AAD_OUTER:  &[u8] = b"vnm:header:outer:v3";
+const AAD_HIDDEN: &[u8] = b"vnm:header:hidden:v3";
+
+/// Decoded header metadata.
 #[derive(Clone)]
 pub struct HeaderPayload {
-    pub master_key:   [u8; 32],
+    pub cipher:            CipherAlgorithm,
+    pub kdf_profile:       u8,
+    pub num_password_slots: u8,
+    pub num_key_slots:     u8,
     /// outer: outer-only slot count; hidden: hidden slot count.
-    pub total_slots:  u64,
+    pub outer_slots:       u64,
     /// outer: 0; hidden: first slot index of the hidden volume.
-    pub hidden_start: u64,
-    pub root_slot:    u64,
-    pub created_at:   u64,
-    pub label:        [u8; 64],
-    pub cipher:       CipherAlgorithm,
-    pub kdf_profile:  u8,
+    pub hidden_start:      u64,
+    pub root_slot:         u64,
+    pub created_at:        u64,
+    pub label:             [u8; 64],
 }
 
-impl Drop for HeaderPayload {
-    fn drop(&mut self) {
-        self.master_key.zeroize();
-    }
-}
-
-/// Encode + encrypt a header with the given password.
-pub fn encode_header_with_password(
-    payload: &HeaderPayload,
-    password: &[u8],
+/// Encode + encrypt a container header with K_master.
+pub fn encode_header(
+    payload:   &HeaderPayload,
+    k_master:  &[u8; 32],
     is_hidden: bool,
 ) -> Result<[u8; HEADER_SIZE]> {
     let mut buf = [0u8; HEADER_SIZE];
 
-    // Random 64-byte salt
     let mut salt = [0u8; SALT_LEN];
     rand::thread_rng().fill_bytes(&mut salt);
     buf[0..SALT_LEN].copy_from_slice(&salt);
 
-    // Cipher ID + KDF profile (plaintext)
     buf[64] = payload.cipher as u8;
     buf[65] = payload.kdf_profile;
-    // buf[66..78] = reserved (zeros, filled by buf initialization)
+    buf[66] = payload.num_password_slots;
+    buf[67] = payload.num_key_slots;
 
-    // Derive key from password + salt
-    let mut kdf = kdf_params_for_profile(payload.kdf_profile);
-    kdf.salt = hex::encode(&salt);
-    let dk  = derive_key(password, &kdf)?;
-    let key: [u8; 32] = dk.as_array_32().unwrap();
-
-    // Build plaintext body
-    let mut body = [0u8; BODY_SIZE];
+    let mut body = [0u8; BODY_LEN];
     body[0..4].copy_from_slice(MAGIC);
     body[4..8].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
-    body[8..40].copy_from_slice(&payload.master_key);
-    body[40..48].copy_from_slice(&payload.total_slots.to_le_bytes());
-    body[48..56].copy_from_slice(&payload.hidden_start.to_le_bytes());
-    body[56..64].copy_from_slice(&payload.root_slot.to_le_bytes());
-    body[64..72].copy_from_slice(&payload.created_at.to_le_bytes());
-    body[72..136].copy_from_slice(&payload.label);
-    // [136..406] zero (reserved)
+    body[8..16].copy_from_slice(&DATA_AREA_OFFSET.to_le_bytes());
+    body[16..24].copy_from_slice(&payload.outer_slots.to_le_bytes());
+    body[24..32].copy_from_slice(&payload.hidden_start.to_le_bytes());
+    body[32..40].copy_from_slice(&payload.root_slot.to_le_bytes());
+    body[40..48].copy_from_slice(&payload.created_at.to_le_bytes());
+    body[48..112].copy_from_slice(&payload.label);
+    // [112..396] reserved zeros
 
-    // Encrypt body → VNMB block (magic+version+nonce+ciphertext+tag)
-    let aad       = if is_hidden { AAD_HIDDEN } else { AAD_OUTER };
-    let encrypted = encrypt_block(&key, payload.cipher, aad, &body)?;
-
-    // Store nonce + ciphertext+tag in header
-    // encrypted layout: VNMB(4) + version(4) + nonce(12) + ciphertext+tag
-    let enc_payload = &encrypted[20..]; // skip 20-byte VNMB block header
-    buf[NONCE_OFFSET..NONCE_OFFSET + 12].copy_from_slice(&encrypted[8..20]);
-    buf[BODY_OFFSET..BODY_OFFSET + enc_payload.len()].copy_from_slice(enc_payload);
+    // AAD includes the salt to bind the ciphertext to this specific container
+    let aad = if is_hidden { AAD_HIDDEN } else { AAD_OUTER };
+    let enc = encrypt_block(k_master, payload.cipher, aad, &body)?;
+    buf[BODY_OFFSET..BODY_OFFSET + enc.len()].copy_from_slice(&enc);
 
     Ok(buf)
 }
 
-/// Decrypt a 512-byte header blob with a candidate password.
+/// Decrypt a 512-byte header with K_master.
 pub fn decode_header(
-    raw: &[u8; HEADER_SIZE],
-    password: &[u8],
+    raw:       &[u8; HEADER_SIZE],
+    k_master:  &[u8; 32],
     is_hidden: bool,
 ) -> Result<HeaderPayload> {
-    let salt       = &raw[0..SALT_LEN];
     let cipher_id  = raw[64];
     let kdf_profile = raw[65];
+    let num_pw     = raw[66];
+    let num_key    = raw[67];
 
     let cipher = match cipher_id {
         0 => CipherAlgorithm::ChaCha20Poly1305,
@@ -163,39 +150,38 @@ pub fn decode_header(
         _ => return Err(VnmError::InvalidFormat(format!("unknown cipher {cipher_id}"))),
     };
 
-    let mut kdf = kdf_params_for_profile(kdf_profile);
-    kdf.salt = hex::encode(salt);
-
-    let dk  = derive_key(password, &kdf)?;
-    let key: [u8; 32] = dk.as_array_32().unwrap();
-
-    // Rebuild VNMB block for decrypt_block
-    let nonce       = &raw[NONCE_OFFSET..NONCE_OFFSET + 12];
-    let enc_payload = &raw[BODY_OFFSET..];
-
-    let mut fuser_block: Vec<u8> = Vec::with_capacity(20 + enc_payload.len());
-    fuser_block.extend_from_slice(b"VNMB");
-    fuser_block.extend_from_slice(&1u32.to_le_bytes());
-    fuser_block.extend_from_slice(nonce);
-    fuser_block.extend_from_slice(enc_payload);
-
     let aad  = if is_hidden { AAD_HIDDEN } else { AAD_OUTER };
-    let body = decrypt_block(&key, cipher, aad, &fuser_block)
+    // Pass exactly the encrypted blob bytes — not the full tail — so the AEAD tag is at the right position.
+    let body = decrypt_block(k_master, cipher, aad, &raw[BODY_OFFSET..BODY_OFFSET + ENC_BODY_SIZE])
         .map_err(|_| VnmError::AuthenticationFailed)?;
 
-    if body.len() < 136 { return Err(VnmError::InvalidFormat("body too short".into())); }
+    if body.len() < 112 { return Err(VnmError::InvalidFormat("header body too short".into())); }
     if &body[0..4] != MAGIC { return Err(VnmError::AuthenticationFailed); }
 
-    let mut master_key = [0u8; 32];
-    master_key.copy_from_slice(&body[8..40]);
+    let outer_slots  = u64::from_le_bytes(body[16..24].try_into().unwrap());
+    let hidden_start = u64::from_le_bytes(body[24..32].try_into().unwrap());
+    let root_slot    = u64::from_le_bytes(body[32..40].try_into().unwrap());
+    let created_at   = u64::from_le_bytes(body[40..48].try_into().unwrap());
+    let mut label    = [0u8; 64];
+    label.copy_from_slice(&body[48..112]);
 
-    let total_slots  = u64::from_le_bytes(body[40..48].try_into().unwrap());
-    let hidden_start = u64::from_le_bytes(body[48..56].try_into().unwrap());
-    let root_slot    = u64::from_le_bytes(body[56..64].try_into().unwrap());
-    let created_at   = u64::from_le_bytes(body[64..72].try_into().unwrap());
+    Ok(HeaderPayload { cipher, kdf_profile, num_password_slots: num_pw, num_key_slots: num_key,
+        outer_slots, hidden_start, root_slot, created_at, label })
+}
 
-    let mut label = [0u8; 64];
-    label.copy_from_slice(&body[72..136]);
+/// Read plaintext fields from a raw header (cipher, kdf_profile, slot counts).
+/// Used to know how many recipient slots to read before we have K_master.
+pub fn read_header_plaintext(raw: &[u8; HEADER_SIZE]) -> (CipherAlgorithm, u8, u8, u8) {
+    let cipher = match raw[64] {
+        1 => CipherAlgorithm::Aes256Gcm,
+        _ => CipherAlgorithm::ChaCha20Poly1305,
+    };
+    (cipher, raw[65], raw[66], raw[67])
+}
 
-    Ok(HeaderPayload { master_key, total_slots, hidden_start, root_slot, created_at, label, cipher, kdf_profile })
+/// Hardcoded Argon2id parameters per profile ID.
+pub fn kdf_params_for_profile_id(profile_id: u8) -> crate::container::KdfParams {
+    kdf_params_for_profile(
+        if profile_id == 1 { "sensitive" } else { "interactive" }
+    )
 }

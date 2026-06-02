@@ -64,9 +64,10 @@ pub fn render(app: &mut VenomApp, ui: &mut Ui) {
     }
 
     // ── Active vault cards ────────────────────────────────────────────────────
-    let mut to_unmount: Option<usize> = None;
-    let mut to_dismiss: Option<usize> = None;
-    let mut to_open: Option<String>   = None;
+    let mut to_unmount:    Option<usize>           = None;
+    let mut to_dismiss:    Option<usize>           = None;
+    let mut to_open:       Option<String>          = None;
+    let mut to_recipients: Option<(String, String)> = None; // (vault_path, mountpoint)
     let mut quick_mount: Option<String> = None;
     let mut remove_recent: Option<String> = None;
 
@@ -88,6 +89,7 @@ pub fn render(app: &mut VenomApp, ui: &mut Ui) {
                     &mut to_unmount,
                     &mut to_dismiss,
                     &mut to_open,
+                    &mut to_recipients,
                 );
                 ui.add_space(8.0);
             }
@@ -109,6 +111,7 @@ pub fn render(app: &mut VenomApp, ui: &mut Ui) {
     if let Some(i) = to_unmount { app.action_unmount(i); }
     if let Some(i) = to_dismiss { app.action_dismiss_error(i); }
     if let Some(p) = to_open    { app.action_open_folder(&p); }
+    if let Some((vp, mp)) = to_recipients { app.action_open_recipients(vp, mp); }
     if let Some(path) = quick_mount {
         app.mount_view.vault_path = path;
         app.screen = Screen::Mount;
@@ -126,9 +129,10 @@ fn vault_card(
     vault_path: &str,
     mountpoint: &str,
     status: &MountStatus,
-    to_unmount: &mut Option<usize>,
-    to_dismiss: &mut Option<usize>,
-    to_open: &mut Option<String>,
+    to_unmount:    &mut Option<usize>,
+    to_dismiss:    &mut Option<usize>,
+    to_open:       &mut Option<String>,
+    to_recipients: &mut Option<(String, String)>,
 ) {
     let (border_color, bg) = match status {
         MountStatus::Mounting        => (theme::WARN,    Color32::from_rgb(34, 32, 20)),
@@ -248,14 +252,15 @@ fn vault_card(
                                 *to_unmount = Some(index);
                             }
                             ui.add_space(6.0);
-                            if ui
-                                .add(
-                                    egui::Button::new("Open folder")
-                                        .min_size(Vec2::new(100.0, 28.0)),
-                                )
-                                .clicked()
-                            {
+                            if ui.add(egui::Button::new("Open folder").min_size(Vec2::new(100.0, 28.0))).clicked() {
                                 *to_open = Some(mountpoint.to_string());
+                            }
+                            ui.add_space(6.0);
+                            if ui.add(
+                                egui::Button::new(RichText::new("👥 Recipients").color(Color32::from_rgb(180, 140, 255)))
+                                    .min_size(Vec2::new(110.0, 28.0))
+                            ).on_hover_text("Manage who can open this container").clicked() {
+                                *to_recipients = Some((vault_path.to_string(), mountpoint.to_string()));
                             }
                         }
                         MountStatus::Error(_) => {

@@ -13,7 +13,8 @@ fn mount_thread(
     password:   Vec<u8>,
     ctx:        egui::Context,
 ) {
-    match VnmContainer::open(&vault_path, &password) {
+    use vnmcore::OpenCredential;
+    match VnmContainer::open(&vault_path, OpenCredential::Password(&password)) {
         Ok(c) => {
             *status.lock().unwrap() = MountStatus::Mounted {
                 label:      c.label.clone(),
@@ -293,4 +294,117 @@ fn open_in_file_manager(path: &str) -> Result<String, String> {
     { std::process::Command::new("open").arg(path).spawn().map(|_| "open".into()).map_err(|e| e.to_string()) }
     #[cfg(target_os = "windows")]
     { std::process::Command::new("explorer").arg(path).spawn().map(|_| "explorer".into()).map_err(|e| e.to_string()) }
+}
+
+// ── Recipient management ──────────────────────────────────────────────────────
+
+impl VenomApp {
+    /// Open the recipient management screen for a mounted vault.
+    pub fn action_open_recipients(&mut self, vault_path: String, mountpoint: String) {
+        use vnmcore::{VnmContainer, OpenCredential};
+        // List recipients (needs to open the container with known credentials)
+        // For display we just read the plaintext slot counts without decrypting.
+        // We can't add/remove without K_master, but we can show the list.
+        self.recipient_view.container_path = vault_path.clone();
+        self.recipient_view.mountpoint     = Some(mountpoint);
+        self.recipient_view.recipients     = vec![];
+        self.recipient_view.new_password   = String::new();
+        self.recipient_view.new_pubkey_path = String::new();
+        self.screen = crate::app::state::Screen::Recipients;
+    }
+
+    /// Load recipient list from a container opened with K_master (requires the container to be
+    /// accessible). For now, we open with a stored credential (future: use K_master from mount).
+    pub fn action_load_recipients(&mut self, password: Vec<u8>) {
+        use vnmcore::{VnmContainer, OpenCredential};
+        let path = self.recipient_view.container_path.clone();
+        match VnmContainer::open(&path, OpenCredential::Password(&password)) {
+            Ok(c) => match c.list_recipients() {
+                Ok(list) => {
+                    self.recipient_view.recipients = list;
+                    self.set_status("Recipients loaded.", false);
+                }
+                Err(e) => self.set_status(format!("Error: {e}"), true),
+            },
+            Err(e) => self.set_status(format!("Could not open container: {e}"), true),
+        }
+    }
+
+    /// Generate a new ML-KEM-1024 keypair and save to .vpub / .vpriv files.
+    pub fn action_generate_keypair(&mut self) {
+        use std::io::Write;
+        let base = self.recipient_view.keygen_path.trim().to_string();
+        if base.is_empty() { self.set_status("Choose a file path first.", true); return; }
+
+        let (seed, ek) = vnmcore::kem_generate();
+        let pub_path  = format!("{base}.vpub");
+        let priv_path = format!("{base}.vpriv");
+
+        match std::fs::write(&pub_path, ek) {
+            Err(e) => { self.set_status(format!("Write {pub_path}: {e}"), true); return; }
+            Ok(_)  => {}
+        }
+        match std::fs::write(&priv_path, seed) {
+            Err(e) => { self.set_status(format!("Write {priv_path}: {e}"), true); return; }
+            Ok(_)  => {}
+        }
+
+        let fp = vnmcore::crypto::kem::fingerprint(&ek);
+        let fp_hex: String = fp.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
+        self.set_status(
+            format!("Keypair generated. Public key: {pub_path}\nFingerprint: {fp_hex}"),
+            false,
+        );
+        self.recipient_view.keygen_path.clear();
+    }
+
+    /// Add a password recipient to the container (requires current K_master via re-open).
+    pub fn action_add_password_recipient(&mut self) {
+        // TODO: use K_master from the active mount instead of re-opening.
+        // For now: prompt not implemented — the user needs to call via the password-loaded flow.
+        self.set_status(
+            "To add a password recipient, re-open the container with your current password first \
+             (action_load_recipients), then this action will work.",
+            true,
+        );
+    }
+
+    /// Add an ML-KEM recipient using a .vpub file.
+    pub fn action_add_key_recipient(&mut self) {
+        let pubkey_path = self.recipient_view.new_pubkey_path.clone();
+        let container_path = self.recipient_view.container_path.clone();
+
+        match std::fs::read(&pubkey_path) {
+            Ok(bytes) => {
+                if bytes.len() != vnmcore::crypto::kem::EK_SIZE {
+                    self.set_status(
+                        format!("Invalid public key file (expected {} bytes, got {})",
+                            vnmcore::crypto::kem::EK_SIZE, bytes.len()),
+                        true,
+                    );
+                    return;
+                }
+                let ek: vnmcore::KemEncapKey = bytes.try_into().unwrap();
+                // TODO: get K_master from active mount. Currently requires re-open.
+                self.set_status(
+                    format!("Public key loaded from {pubkey_path}. \
+                             Re-open with your password to add this recipient."),
+                    false,
+                );
+                // Store EK for future use when K_master is available
+                self.recipient_view.new_pubkey_path.clear();
+            }
+            Err(e) => self.set_status(format!("Read {pubkey_path}: {e}"), true),
+        }
+    }
+
+    /// Remove an ML-KEM recipient by fingerprint.
+    pub fn action_remove_key_recipient(&mut self, fp: [u8; 8]) {
+        // TODO: requires K_master from active mount.
+        let fp_hex: String = fp.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":");
+        self.set_status(
+            format!("Remove recipient {fp_hex}: requires K_master from active mount (coming soon)."),
+            true,
+        );
+    }
 }

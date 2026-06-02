@@ -1,7 +1,7 @@
 /// Diagnostic: create or open a container and mount it.
 /// Usage: cargo run -p vnmcore --example mount_test -- <container.vnm> <mountpoint>
 use std::sync::Arc;
-use vnmcore::{container::CipherAlgorithm, fs::{VnmContainer, fuse::driver}};
+use vnmcore::{container::CipherAlgorithm, fs::{VnmContainer, fuse::driver}, OpenCredential};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -15,7 +15,7 @@ fn main() {
 
     let c = if std::path::Path::new(container_path).exists() {
         println!("[1/3] Opening existing container {container_path}…");
-        VnmContainer::open(container_path, b"test-password").expect("open failed")
+        VnmContainer::open(container_path, OpenCredential::Password(b"test-password")).expect("open failed")
     } else {
         println!("[1/3] Creating new container {container_path} (16 MB)…");
         VnmContainer::create(

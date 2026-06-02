@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use rand::RngCore;
 
 use crate::{Result, VnmError};
-use crate::container::{CipherAlgorithm, HEADER_REGION_SIZE, SLOT_SIZE};
+use crate::container::{CipherAlgorithm, DATA_AREA_OFFSET, SLOT_SIZE};
 use crate::crypto::{decrypt_block, encrypt_block};
 
 /// Maximum bytes available for user data in a slot (payload capacity).
@@ -61,7 +61,7 @@ impl SlotStore {
     // ── Slot I/O ─────────────────────────────────────────────────────────────
 
     fn slot_offset(slot: u64) -> u64 {
-        HEADER_REGION_SIZE + slot * SLOT_SIZE as u64
+        DATA_AREA_OFFSET + slot * SLOT_SIZE as u64
     }
 
     /// Encrypt `plaintext` and write it to `slot`.

@@ -1,40 +1,48 @@
-//! High-level container API.
+//! VnmContainer v3 — single-file encrypted container with multi-recipient support.
 //!
-//! ## File layout (version 2)
+//! ## Open flow
 //!
-//!   [0..512]                      Outer header
-//!   [512..1024]                   Random reserved bytes (no header here)
-//!   [1024 .. 1024+outer*32768]    Outer slots  [0..outer_slots)
-//!   [1024+outer*32768 .. end-512] Hidden slots [outer_slots..outer+hidden) — absent if no hidden
-//!   [end-512 .. end]              Hidden header (or random bytes if no hidden volume)
+//!   1. Read outer header (512 B at offset 0) → get cipher, kdf_profile, slot counts
+//!   2. Read recipient area (at HEADER_REGION_SIZE): password slots then ML-KEM slots
+//!   3. Try each slot with the provided credential → obtain K_master
+//!   4. Decrypt header body with K_master → get metadata (outer_slots, root_slot, …)
+//!   5. Access data via SlotStore
 //!
-//! Key deniability property: the outer header claims `total_slots = outer_slots`
-//! (the outer volume appears to own the full container).  The extra space at the
-//! end (hidden volume + its header) is indistinguishable from slack space to an
-//! attacker who only has the outer password.
+//! ## File layout
+//!
+//!   [0..512]                   Outer header (VNM3)
+//!   [512..1024]                Random reserved (no header here)
+//!   [1024..1024+RECIPIENT_AREA] Recipient slots (fixed size, unused = random bytes)
+//!   [DATA_AREA_OFFSET..]       Data slots (32 KB each)
+//!   [end-512..end]             Hidden header (VNM3) or random bytes
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::fs::OpenOptions;
+use std::io::{Read, Write, Seek, SeekFrom};
 
 use rand::RngCore;
 
 use crate::{Result, VnmError};
 use crate::container::{
-    CipherAlgorithm, HeaderPayload, HEADER_REGION_SIZE, SLOT_SIZE,
-    encode_header_with_password, decode_header,
-    kdf_params_for_profile, profile_id_for_str,
+    CipherAlgorithm,
+    HEADER_REGION_SIZE, SLOT_SIZE, DATA_AREA_OFFSET,
+    MAX_PASSWORD_SLOTS, MAX_KEY_SLOTS, PW_SLOT_SIZE, KEY_SLOT_SIZE, RECIPIENT_AREA_SIZE,
+    encode_header, decode_header, read_header_plaintext, kdf_params_for_profile,
+    encode_password_slot, try_password_slot,
+    encode_key_slot, try_key_slot,
+    slot_fingerprint, read_slot_fingerprint,
 };
+use crate::crypto::kem::{EncapKey, Seed, EK_SIZE, SEED_SIZE};
 use crate::storage::{SlotStore, VaultNode, NodeKind};
 use crate::storage::vault_fs::DirectoryBlock;
+use crate::container::header::HeaderPayload;
 
 const OUTER_ALLOC_SLOT: u64 = 0;
+const OUTER_ROOT_SLOT:  u64 = 1;
 
-/// Minimum container size: header region + at least 16 outer slots.
-pub const MIN_SIZE: u64 = HEADER_REGION_SIZE + 16 * SLOT_SIZE as u64;
-
-/// Byte offset of the outer header in the file.
-const OUTER_HEADER_OFFSET: u64 = 0;
+/// File must be at least this large.
+pub const MIN_SIZE: u64 = DATA_AREA_OFFSET + 16 * SLOT_SIZE as u64 + 512;
 
 /// Options for the hidden volume.
 pub struct HiddenVolumeOptions<'a> {
@@ -44,30 +52,46 @@ pub struct HiddenVolumeOptions<'a> {
     pub kdf_profile: &'a str,
 }
 
-/// A mounted Venom container (outer or hidden volume).
+/// Credential used to open a container.
+pub enum OpenCredential<'a> {
+    /// Password (tries all password slots).
+    Password(&'a [u8]),
+    /// ML-KEM private key seed (tries all key slots).
+    PrivateKey(&'a Seed),
+}
+
+/// Summary of one recipient slot (for display in the GUI).
+pub struct RecipientInfo {
+    pub is_key:      bool,
+    pub fingerprint: [u8; 8], // ML-KEM EK fingerprint (key slots) or zero (password slots)
+    pub slot_index:  usize,
+}
+
+/// A mounted Venom container.
 pub struct VnmContainer {
-    pub store:      SlotStore,
-    pub root_slot:  u64,
-    pub is_hidden:  bool,
-    pub cipher:     CipherAlgorithm,
-    pub total_slots: u64,   // outer: outer-only count; hidden: hidden count
-    pub outer_limit: u64,   // first slot index that belongs to the hidden area
-    pub label:      Option<String>,
-    pub created_at: u64,
-    path:           PathBuf,
+    pub store:       SlotStore,
+    pub root_slot:   u64,
+    pub is_hidden:   bool,
+    pub cipher:      CipherAlgorithm,
+    pub outer_slots: u64,
+    pub outer_limit: u64,   // = outer_slots for outer vol; = hidden_start for hidden vol
+    pub label:       Option<String>,
+    pub created_at:  u64,
+    k_master:        [u8; 32], // kept for add/remove_recipient
+    path:            PathBuf,
 }
 
 impl VnmContainer {
     // ── Create ────────────────────────────────────────────────────────────────
 
     pub fn create(
-        path: impl AsRef<Path>,
-        outer_password: &[u8],
+        path:            impl AsRef<Path>,
+        outer_password:  &[u8],
         total_size_bytes: u64,
-        cipher: CipherAlgorithm,
-        kdf_profile: &str,
-        label: Option<String>,
-        hidden: Option<HiddenVolumeOptions<'_>>,
+        cipher:          CipherAlgorithm,
+        kdf_profile:     &str,
+        label:           Option<String>,
+        hidden:          Option<HiddenVolumeOptions<'_>>,
     ) -> Result<Self> {
         let path = path.as_ref();
         if path.exists() {
@@ -77,16 +101,12 @@ impl VnmContainer {
             return Err(VnmError::SizeTooSmall(MIN_SIZE));
         }
 
-        // File layout:
-        //   HEADER_REGION_SIZE bytes  (outer header + reserved)
-        //   outer_slots * SLOT_SIZE   bytes
-        //   [hidden_slots * SLOT_SIZE bytes] — only if hidden volume
-        //   512 bytes                  — hidden header slot (random if no hidden)
-        let usable = total_size_bytes.saturating_sub(HEADER_REGION_SIZE + 512);
-        let total_data_slots = usable / SLOT_SIZE as u64;
+        // Compute slot counts
+        let usable_for_data = total_size_bytes.saturating_sub(DATA_AREA_OFFSET + 512);
+        let total_data_slots = usable_for_data / SLOT_SIZE as u64;
 
         let (outer_slots, hidden_slots) = match &hidden {
-            None => (total_data_slots, 0u64),
+            None    => (total_data_slots, 0u64),
             Some(h) => {
                 let h_slots = ((h.size_bytes + SLOT_SIZE as u64 - 1) / SLOT_SIZE as u64).max(2);
                 let o_slots = total_data_slots.saturating_sub(h_slots);
@@ -96,202 +116,317 @@ impl VnmContainer {
         };
 
         // Physical file size
-        let file_size = HEADER_REGION_SIZE
+        let file_size = DATA_AREA_OFFSET
             + (outer_slots + hidden_slots) * SLOT_SIZE as u64
-            + 512; // hidden header / random tail
+            + 512; // tail: hidden header or random
 
-        // 1. Create file and fill entirely with random bytes (deniability requirement).
+        // 1. Create + fill with random bytes (deniability)
+        { std::fs::File::create(path)?.set_len(file_size)?; }
         {
-            let f = std::fs::File::create(path)?;
-            f.set_len(file_size)?;
-        }
-        {
-            use std::io::Write;
-            let mut f = OpenOptions::new().write(true).open(path)?;
-            let mut rng  = rand::thread_rng();
-            let mut chunk = vec![0u8; SLOT_SIZE];
-            let mut written = 0u64;
-            while written < file_size {
-                rng.fill_bytes(&mut chunk);
-                let n = ((file_size - written) as usize).min(chunk.len());
-                f.write_all(&chunk[..n])?;
-                written += n as u64;
+            let mut f   = OpenOptions::new().write(true).open(path)?;
+            let mut rng = rand::thread_rng();
+            let mut buf = vec![0u8; 65536];
+            let mut done = 0u64;
+            while done < file_size {
+                rng.fill_bytes(&mut buf);
+                let n = ((file_size - done) as usize).min(buf.len());
+                f.write_all(&buf[..n])?;
+                done += n as u64;
             }
         }
 
-        let now          = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        let outer_kdf_id = profile_id_for_str(kdf_profile);
-        let outer_key    = new_master_key();
+        let now     = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let k_outer = new_k_master();
+        let kdf_id  = if kdf_profile == "sensitive" { 1u8 } else { 0u8 };
 
-        // 2. Write hidden header at end of file (before writing outer header).
+        // 2. Write hidden header at end (if requested)
         if let Some(ref h) = hidden {
-            let hidden_kdf_id = profile_id_for_str(h.kdf_profile);
-            let hidden_key    = new_master_key();
-            let hidden_start  = outer_slots;
-            let hidden_alloc  = hidden_start + hidden_slots - 1; // last hidden slot = alloc bitmap
-
-            let mut lbl = [0u8; 64];
+            let k_hidden   = new_k_master();
+            let hid_start  = outer_slots;
+            let hid_kdf_id = if h.kdf_profile == "sensitive" { 1u8 } else { 0u8 };
+            let mut hid_lbl = [0u8; 64];
             if let Some(ref s) = h.label {
-                let b = s.as_bytes(); lbl[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
+                let b = s.as_bytes(); hid_lbl[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
             }
 
-            let hidden_payload = HeaderPayload {
-                master_key:   hidden_key,
-                total_slots:  hidden_slots,
-                hidden_start,
-                root_slot:    hidden_start + 1,
-                created_at:   now,
-                label:        lbl,
-                cipher,
-                kdf_profile:  hidden_kdf_id,
+            // Password slot for hidden volume
+            let pw_slot = encode_password_slot(&k_hidden, h.password, hid_kdf_id, cipher)?;
+
+            let hid_payload = HeaderPayload {
+                cipher, kdf_profile: hid_kdf_id,
+                num_password_slots: 1, num_key_slots: 0,
+                outer_slots: hidden_slots, hidden_start: hid_start,
+                root_slot: hid_start + 1, created_at: now, label: hid_lbl,
             };
-            let hidden_hdr = encode_header_with_password(&hidden_payload, h.password, true)?;
-            write_at(path, file_size - 512, &hidden_hdr)?;
+            let hid_hdr = encode_header(&hid_payload, &k_hidden, true)?;
+            write_bytes_at(path, file_size - 512, &hid_hdr)?;
 
-            // Initialise hidden slot store
-            let hidden_store = open_slot_store(path, hidden_key, cipher,
-                hidden_start, hidden_start + hidden_slots, hidden_alloc)?;
-            hidden_store.rebuild_free_list();
-            {
-                let mut free = hidden_store.free.lock().unwrap();
-                free.retain(|&s| s != hidden_start + 1); // root slot reserved
-            }
-            write_empty_root_dir(&hidden_store, hidden_start + 1)?;
-            hidden_store.save_free_list()?;
+            // Recipient area for hidden volume: write pw slot at offset 0 of hidden recipient area
+            // (hidden volume's recipient area is within its header on disk — no separate area)
+            // For simplicity, hidden volume uses a separate in-memory slot lookup:
+            // the pw_slot is stored in the hidden header's reserved area? No, let's keep it simple:
+            // The hidden volume's recipient slots are at the same HEADER_REGION_SIZE offset
+            // but that's the outer volume's recipient area. For the hidden volume, we store
+            // the password slot inline in the header body encrypted region.
+            // Actually, let me re-architect: hidden volume uses the tail of the file as its
+            // "recipient area" too. But to keep things simple, hidden volume supports
+            // only 1 password slot for now, stored in its header (we'll pack it in reserved bytes).
+            // Actually the cleanest: encode the pw_slot as part of the hidden header's payload.
+            // Let me just store it in the file right after the hidden header.
+            // File: [...][hid_header(512)][hid_pw_slot(101)][end]
+            // But that changes the end. Let me instead make the hidden volume's slots
+            // stored at file_size - 512 - RECIPIENT_AREA_SIZE ... nah this gets complex.
+
+            // SIMPLE APPROACH: hidden volume password is derived differently.
+            // The hidden header body is encrypted with K_hidden (derived from password).
+            // No separate recipient area for hidden volume.
+            // → We'll re-derive K_hidden from the password when opening.
+
+            // So for the hidden header, K_hidden = Argon2id(h.password, salt_in_hidden_hdr).
+            // The hidden header was already written above, but we need to re-think the design.
+            // Let me use the V2 approach for the hidden header: derive K_master from password.
+            drop(pw_slot); // unused
+
+            // Re-derive the hidden master key from the password (same as v2 approach for hidden)
+            let mut hkdf = kdf_params_for_profile(h.kdf_profile);
+            // Use a random salt stored in the hidden header's first 64 bytes
+            // → already done by encode_header (it generates a random salt internally)
+            // We need to get K_hidden from the password when opening.
+            // But encode_header encrypts with k_hidden (master key), not with password.
+            // We need: encrypted_body = AEAD(K_from_password, body) OR AEAD(K_master, body)
+            //
+            // The v3 design uses K_master to encrypt the header body.
+            // For hidden volume: user provides password → we need K_master from a recipient slot.
+            //
+            // Solution: store a password recipient slot in the hidden header's tail bytes.
+            // The hidden header is 512 bytes. Payload starts at byte 68. We have ~432 bytes.
+            // Body takes 432 bytes (encrypted). We can't fit a pw slot (101 bytes) inside.
+            //
+            // REVISED APPROACH for hidden volume:
+            // The hidden header is encrypted with a key derived directly from the hidden password.
+            // This is simpler and avoids the recipient area complexity for the hidden volume.
+            // K_hidden_hdr = Argon2id(hidden_password, salt_in_hidden_header)
+            // Then K_master_hidden is INSIDE the hidden header body (like V2).
+            // → Use a modified encode_header that takes a password directly (not K_master).
+            //
+            // Let's use the simplest approach:
+            // Hidden header encrypted with Argon2id(password, salt) like V2.
+            // This is already what encode_header_v2 did. Let me add a helper.
+
+            let hid_hdr = encode_header_with_password(&hid_payload, h.password, true, &k_hidden)?;
+            write_bytes_at(path, file_size - 512, &hid_hdr)?;
+
+            // Init hidden slot store (hidden volume has its own alloc in its first slot)
+            let hid_alloc = hid_start + hidden_slots - 1;
+            let hid_store = open_store(path, k_hidden, cipher, hid_start, hid_start + hidden_slots, hid_alloc)?;
+            hid_store.rebuild_free_list();
+            { hid_store.free.lock().unwrap().retain(|&s| s != hid_start + 1); }
+            write_empty_dir(&hid_store, hid_start + 1)?;
+            hid_store.save_free_list()?;
         }
 
-        // 3. Write outer header at offset 0.
-        let mut outer_lbl = [0u8; 64];
+        // 3. Write outer header
+        let mut lbl = [0u8; 64];
         if let Some(ref s) = label {
-            let b = s.as_bytes(); outer_lbl[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
+            let b = s.as_bytes(); lbl[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
         }
         let outer_payload = HeaderPayload {
-            master_key:   outer_key,
-            total_slots:  outer_slots,  // outer volume claims only its own slots
-            hidden_start: 0,
-            root_slot:    1,
-            created_at:   now,
-            label:        outer_lbl,
-            cipher,
-            kdf_profile:  outer_kdf_id,
+            cipher, kdf_profile: kdf_id,
+            num_password_slots: 1, num_key_slots: 0,
+            outer_slots, hidden_start: 0,
+            root_slot: OUTER_ROOT_SLOT, created_at: now, label: lbl,
         };
-        let outer_hdr = encode_header_with_password(&outer_payload, outer_password, false)?;
-        write_at(path, OUTER_HEADER_OFFSET, &outer_hdr)?;
+        let outer_hdr = encode_header(&outer_payload, &k_outer, false)?;
+        write_bytes_at(path, 0, &outer_hdr)?;
 
-        // 4. Initialise outer slot store.
-        let outer_store = open_slot_store(path, outer_key, cipher,
-            0, outer_slots, OUTER_ALLOC_SLOT)?;
+        // 4. Write password recipient slot for outer volume
+        let pw_slot = encode_password_slot(&k_outer, outer_password, kdf_id, cipher)?;
+        write_recipient_slot(path, 0, &pw_slot)?;
+        // Fill remaining password slots + all key slots with random bytes (already done by fill)
+
+        // 5. Init outer slot store
+        let outer_store = open_store(path, k_outer, cipher, 0, outer_slots, OUTER_ALLOC_SLOT)?;
         outer_store.rebuild_free_list();
-        { outer_store.free.lock().unwrap().retain(|&s| s != 1); }
-        write_empty_root_dir(&outer_store, 1)?;
+        { outer_store.free.lock().unwrap().retain(|&s| s != OUTER_ROOT_SLOT); }
+        write_empty_dir(&outer_store, OUTER_ROOT_SLOT)?;
         outer_store.save_free_list()?;
 
         Ok(VnmContainer {
             store:       outer_store,
-            root_slot:   1,
+            root_slot:   OUTER_ROOT_SLOT,
             is_hidden:   false,
             cipher,
-            total_slots: outer_slots,
+            outer_slots,
             outer_limit: outer_slots,
             label,
             created_at:  now,
+            k_master:    k_outer,
             path:        path.to_path_buf(),
         })
     }
 
     // ── Open ──────────────────────────────────────────────────────────────────
 
-    /// Open an existing container.  Tries the outer header first (offset 0),
-    /// then the hidden header (file_end − 512).  Returns whichever volume the
-    /// password decrypts.
-    pub fn open(path: impl AsRef<Path>, password: &[u8]) -> Result<Self> {
-        let path      = path.as_ref();
-        if !path.exists() {
-            return Err(VnmError::ContainerNotFound(path.display().to_string()));
-        }
+    pub fn open(path: impl AsRef<Path>, credential: OpenCredential<'_>) -> Result<Self> {
+        let path = path.as_ref();
+        if !path.exists() { return Err(VnmError::ContainerNotFound(path.display().to_string())); }
         let file_size = std::fs::metadata(path)?.len();
 
-        // Read outer header (512 bytes at offset 0)
-        let outer_raw = read_at(path, OUTER_HEADER_OFFSET)?;
-        // Read hidden header (512 bytes at file_end - 512)
-        let hidden_raw = if file_size >= 512 {
-            read_at(path, file_size - 512).unwrap_or([0u8; 512])
-        } else {
-            [0u8; 512]
+        let outer_raw  = read_512_at(path, 0)?;
+        let hidden_raw = read_512_at(path, file_size.saturating_sub(512)).unwrap_or([0u8; 512]);
+
+        let (cipher, kdf_profile, n_pw, n_key) = read_header_plaintext(&outer_raw);
+
+        // Try outer volume
+        let k_outer = match &credential {
+            OpenCredential::Password(pw) => {
+                try_pw_slots(path, *pw, n_pw, cipher)
+            }
+            OpenCredential::PrivateKey(seed) => {
+                try_key_slots(path, seed, n_key, cipher)
+            }
         };
 
-        // Try outer header
-        if let Ok(p) = decode_header(&outer_raw, password, false) {
-            let outer_limit = p.total_slots;
-            let store = open_slot_store(path, p.master_key, p.cipher,
-                0, outer_limit, OUTER_ALLOC_SLOT)?;
-            store.load_free_list()?;
-            return Ok(VnmContainer {
-                root_slot:   p.root_slot,
-                is_hidden:   false,
-                cipher:      p.cipher,
-                total_slots: p.total_slots,
-                outer_limit,
-                label:       label_from(p.label),
-                created_at:  p.created_at,
-                store,
-                path:        path.to_path_buf(),
-            });
+        if let Some(k) = k_outer {
+            if let Ok(meta) = decode_header(&outer_raw, &k, false) {
+                let store = open_store(path, k, cipher, 0, meta.outer_slots, OUTER_ALLOC_SLOT)?;
+                store.load_free_list()?;
+                return Ok(VnmContainer {
+                    root_slot:   meta.root_slot,
+                    is_hidden:   false,
+                    cipher,
+                    outer_slots: meta.outer_slots,
+                    outer_limit: meta.outer_slots,
+                    label:       label_from(meta.label),
+                    created_at:  meta.created_at,
+                    k_master:    k,
+                    store,
+                    path:        path.to_path_buf(),
+                });
+            }
         }
 
-        // Try hidden header
-        if let Ok(p) = decode_header(&hidden_raw, password, true) {
-            let hidden_start = p.hidden_start;
-            let hidden_end   = hidden_start + p.total_slots;
-            let hidden_alloc = hidden_end - 1; // last hidden slot = alloc bitmap
-            let store = open_slot_store(path, p.master_key, p.cipher,
-                hidden_start, hidden_end, hidden_alloc)?;
-            store.load_free_list()?;
-            // outer_limit = hidden_start (outer area boundary, used for statfs)
-            return Ok(VnmContainer {
-                root_slot:   p.root_slot,
-                is_hidden:   true,
-                cipher:      p.cipher,
-                total_slots: p.total_slots,
-                outer_limit: hidden_start,
-                label:       label_from(p.label),
-                created_at:  p.created_at,
-                store,
-                path:        path.to_path_buf(),
-            });
+        // Try hidden volume (password-derived key, V2-style for simplicity)
+        if let OpenCredential::Password(pw) = &credential {
+            if let Ok(k) = derive_hidden_key(&hidden_raw, pw) {
+                if let Ok(meta) = decode_header(&hidden_raw, &k, true) {
+                    let hid_start = meta.hidden_start;
+                    let hid_end   = hid_start + meta.outer_slots;
+                    let hid_alloc = hid_end - 1;
+                    let store = open_store(path, k, meta.cipher, hid_start, hid_end, hid_alloc)?;
+                    store.load_free_list()?;
+                    return Ok(VnmContainer {
+                        root_slot:   meta.root_slot,
+                        is_hidden:   true,
+                        cipher:      meta.cipher,
+                        outer_slots: meta.outer_slots,
+                        outer_limit: hid_start,
+                        label:       label_from(meta.label),
+                        created_at:  meta.created_at,
+                        k_master:    k,
+                        store,
+                        path:        path.to_path_buf(),
+                    });
+                }
+            }
         }
 
         Err(VnmError::AuthenticationFailed)
+    }
+
+    // ── Recipients ────────────────────────────────────────────────────────────
+
+    /// List all recipient slots (password and ML-KEM).
+    pub fn list_recipients(&self) -> Result<Vec<RecipientInfo>> {
+        let raw = read_512_at(&self.path, 0)?;
+        let (_, _, n_pw, n_key) = read_header_plaintext(&raw);
+        let mut out = vec![];
+
+        for i in 0..n_pw as usize {
+            out.push(RecipientInfo { is_key: false, fingerprint: [0; 8], slot_index: i });
+        }
+        for j in 0..n_key as usize {
+            let slot = read_key_slot_raw(&self.path, j)?;
+            let fp = read_slot_fingerprint(&slot);
+            out.push(RecipientInfo { is_key: true, fingerprint: fp, slot_index: j });
+        }
+        Ok(out)
+    }
+
+    /// Add a new password recipient.
+    pub fn add_password_recipient(&self, new_password: &[u8]) -> Result<()> {
+        let raw = read_512_at(&self.path, 0)?;
+        let (cipher, kdf_profile, n_pw, n_key) = read_header_plaintext(&raw);
+        if n_pw as usize >= MAX_PASSWORD_SLOTS {
+            return Err(VnmError::InvalidFormat("max password recipients reached".into()));
+        }
+        let slot = encode_password_slot(&self.k_master, new_password, kdf_profile, self.cipher)?;
+        write_recipient_slot(&self.path, n_pw as usize, &slot)?;
+        update_slot_counts(&self.path, n_pw + 1, n_key, &self.k_master, cipher, &raw)?;
+        Ok(())
+    }
+
+    /// Add a new ML-KEM (post-quantum) recipient using their public key.
+    pub fn add_key_recipient(&self, ek: &EncapKey) -> Result<()> {
+        let raw = read_512_at(&self.path, 0)?;
+        let (cipher, _, n_pw, n_key) = read_header_plaintext(&raw);
+        if n_key as usize >= MAX_KEY_SLOTS {
+            return Err(VnmError::InvalidFormat("max key recipients reached".into()));
+        }
+        let slot = encode_key_slot(&self.k_master, ek, self.cipher)?;
+        write_key_slot_raw(&self.path, n_key as usize, &slot)?;
+        update_slot_counts(&self.path, n_pw, n_key + 1, &self.k_master, cipher, &raw)?;
+        Ok(())
+    }
+
+    /// Remove an ML-KEM recipient by fingerprint.
+    pub fn remove_key_recipient(&self, fingerprint: &[u8; 8]) -> Result<()> {
+        let raw = read_512_at(&self.path, 0)?;
+        let (cipher, _, n_pw, n_key) = read_header_plaintext(&raw);
+
+        let mut slots: Vec<[u8; KEY_SLOT_SIZE]> = (0..n_key as usize)
+            .map(|i| read_key_slot_raw(&self.path, i))
+            .collect::<Result<_>>()?;
+
+        let before = slots.len();
+        slots.retain(|s| read_slot_fingerprint(s) != *fingerprint);
+        if slots.len() == before {
+            return Err(VnmError::InvalidFormat("recipient not found".into()));
+        }
+
+        // Rewrite all key slots
+        for (i, s) in slots.iter().enumerate() {
+            write_key_slot_raw(&self.path, i, s)?;
+        }
+        // Wipe the last slot (now unused) with random bytes
+        let mut rng = rand::thread_rng();
+        let mut random_slot = vec![0u8; KEY_SLOT_SIZE];
+        rng.fill_bytes(&mut random_slot);
+        write_key_slot_raw(&self.path, slots.len(), random_slot.as_slice().try_into().unwrap())?;
+
+        update_slot_counts(&self.path, n_pw, n_key - 1, &self.k_master, cipher, &raw)?;
+        Ok(())
     }
 
     // ── Node I/O ──────────────────────────────────────────────────────────────
 
     pub fn read_node(&self, slot: u64) -> Result<VaultNode> {
         let data = self.store.read(slot)?;
-        rmp_serde::from_slice(&data)
-            .map_err(|e| VnmError::Serialization(e.to_string()))
+        rmp_serde::from_slice(&data).map_err(|e| VnmError::Serialization(e.to_string()))
     }
-
     pub fn write_node(&self, node: &VaultNode) -> Result<u64> {
         let slot    = self.store.alloc()?;
-        let payload = rmp_serde::to_vec_named(node)
-            .map_err(|e| VnmError::Serialization(e.to_string()))?;
+        let payload = rmp_serde::to_vec_named(node).map_err(|e| VnmError::Serialization(e.to_string()))?;
         self.store.write(slot, &payload)?;
         Ok(slot)
     }
-
     pub fn update_node(&self, slot: u64, node: &VaultNode) -> Result<()> {
-        let payload = rmp_serde::to_vec_named(node)
-            .map_err(|e| VnmError::Serialization(e.to_string()))?;
+        let payload = rmp_serde::to_vec_named(node).map_err(|e| VnmError::Serialization(e.to_string()))?;
         self.store.write(slot, &payload)
     }
-
-    pub fn free_node(&self, slot: u64) {
-        self.store.free_slot(slot);
-    }
-
-    pub fn root_slot(&self)  -> u64  { self.root_slot }
-    pub fn path(&self)       -> &Path { &self.path }
+    pub fn free_node(&self, slot: u64) { self.store.free_slot(slot); }
+    pub fn root_slot(&self) -> u64 { self.root_slot }
+    pub fn path(&self) -> &Path { &self.path }
 
     pub fn flush(&self) -> Result<()> {
         self.store.save_free_list()?;
@@ -301,45 +436,160 @@ impl VnmContainer {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn new_master_key() -> [u8; 32] {
+fn new_k_master() -> [u8; 32] {
     let mut k = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut k);
     k
 }
 
-fn open_slot_store(
-    path: &Path, key: [u8; 32], cipher: CipherAlgorithm,
-    slot_start: u64, slot_limit: u64, alloc_slot: u64,
-) -> Result<SlotStore> {
-    let file = OpenOptions::new().read(true).write(true).open(path)?;
-    Ok(SlotStore::new(file, key, cipher, slot_start, slot_limit, alloc_slot))
+fn open_store(path: &Path, k: [u8; 32], c: CipherAlgorithm, s: u64, l: u64, a: u64) -> Result<SlotStore> {
+    let f = OpenOptions::new().read(true).write(true).open(path)?;
+    Ok(SlotStore::new(f, k, c, s, l, a))
 }
 
-fn write_at(path: &Path, offset: u64, data: &[u8]) -> Result<()> {
-    use std::io::{Write, Seek, SeekFrom};
+fn write_bytes_at(path: &Path, offset: u64, data: &[u8]) -> Result<()> {
     let mut f = OpenOptions::new().write(true).open(path)?;
     f.seek(SeekFrom::Start(offset))?;
     f.write_all(data)?;
     Ok(())
 }
 
-fn read_at(path: &Path, offset: u64) -> Result<[u8; 512]> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path)?;
-    f.seek(SeekFrom::Start(offset))?;
+fn read_512_at(path: &Path, offset: u64) -> Result<[u8; 512]> {
+    let mut f   = std::fs::File::open(path)?;
     let mut buf = [0u8; 512];
+    f.seek(SeekFrom::Start(offset))?;
     f.read_exact(&mut buf)?;
     Ok(buf)
 }
 
-fn write_empty_root_dir(store: &SlotStore, slot: u64) -> Result<()> {
-    let root = VaultNode::Directory(DirectoryBlock { kind: NodeKind::Directory, entries: vec![] });
-    let data = rmp_serde::to_vec_named(&root)
-        .map_err(|e| VnmError::Serialization(e.to_string()))?;
+fn write_empty_dir(store: &SlotStore, slot: u64) -> Result<()> {
+    let node = VaultNode::Directory(DirectoryBlock { kind: NodeKind::Directory, entries: vec![] });
+    let data = rmp_serde::to_vec_named(&node).map_err(|e| VnmError::Serialization(e.to_string()))?;
     store.write(slot, &data)
 }
 
 fn label_from(raw: [u8; 64]) -> Option<String> {
     let end = raw.iter().position(|&b| b == 0).unwrap_or(64);
     if end == 0 { None } else { String::from_utf8(raw[..end].to_vec()).ok() }
+}
+
+/// Byte offset of password slot `i` in the file.
+fn pw_slot_offset(i: usize) -> u64 {
+    HEADER_REGION_SIZE + (i * PW_SLOT_SIZE) as u64
+}
+
+/// Byte offset of ML-KEM key slot `j` in the file.
+fn key_slot_offset(j: usize) -> u64 {
+    HEADER_REGION_SIZE + (MAX_PASSWORD_SLOTS * PW_SLOT_SIZE + j * KEY_SLOT_SIZE) as u64
+}
+
+fn write_recipient_slot(path: &Path, i: usize, slot: &[u8; PW_SLOT_SIZE]) -> Result<()> {
+    write_bytes_at(path, pw_slot_offset(i), slot)
+}
+
+fn read_key_slot_raw(path: &Path, j: usize) -> Result<[u8; KEY_SLOT_SIZE]> {
+    let mut f   = std::fs::File::open(path)?;
+    let mut buf = [0u8; KEY_SLOT_SIZE];
+    f.seek(SeekFrom::Start(key_slot_offset(j)))?;
+    f.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+fn write_key_slot_raw(path: &Path, j: usize, slot: &[u8; KEY_SLOT_SIZE]) -> Result<()> {
+    write_bytes_at(path, key_slot_offset(j), slot)
+}
+
+/// Try all password slots with the given password.  Returns K_master on success.
+fn try_pw_slots(path: &Path, pw: &[u8], n: u8, cipher: CipherAlgorithm) -> Option<[u8; 32]> {
+    for i in 0..n as usize {
+        let slot = read_pw_slot_raw(path, i).ok()?;
+        if let Some(k) = try_password_slot(&slot, pw, cipher) { return Some(k); }
+    }
+    None
+}
+
+fn read_pw_slot_raw(path: &Path, i: usize) -> Result<[u8; PW_SLOT_SIZE]> {
+    let mut f   = std::fs::File::open(path)?;
+    let mut buf = [0u8; PW_SLOT_SIZE];
+    f.seek(SeekFrom::Start(pw_slot_offset(i)))?;
+    f.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// Try all ML-KEM slots with the given seed.  Returns K_master on success.
+fn try_key_slots(path: &Path, seed: &Seed, n: u8, cipher: CipherAlgorithm) -> Option<[u8; 32]> {
+    for j in 0..n as usize {
+        let slot = read_key_slot_raw(path, j).ok()?;
+        if let Some(k) = try_key_slot(&slot, seed, cipher) { return Some(k); }
+    }
+    None
+}
+
+/// Re-write the outer header with updated slot counts (after add/remove recipient).
+fn update_slot_counts(
+    path: &Path, n_pw: u8, n_key: u8, k_master: &[u8; 32],
+    cipher: CipherAlgorithm, old_raw: &[u8; 512],
+) -> Result<()> {
+    // Decode existing metadata
+    let meta = decode_header(old_raw, k_master, false)?;
+    let new_payload = HeaderPayload { num_password_slots: n_pw, num_key_slots: n_key, ..meta };
+    let new_hdr = encode_header(&new_payload, k_master, false)?;
+    write_bytes_at(path, 0, &new_hdr)
+}
+
+/// Derive the hidden-header encryption key directly from the password (v3 hidden volumes
+/// use a password-derived key for the header, like V2, to avoid a separate recipient area).
+fn derive_hidden_key(raw: &[u8; 512], password: &[u8]) -> Result<[u8; 32]> {
+    use crate::crypto::derive_key;
+    use crate::container::kdf_params_for_profile;
+    let salt        = &raw[0..64];
+    let kdf_profile = raw[65];
+    let mut kdf = kdf_params_for_profile(if kdf_profile == 1 { "sensitive" } else { "interactive" });
+    kdf.salt = hex::encode(salt);
+    let dk = derive_key(password, &kdf)?;
+    Ok(dk.as_array_32().unwrap())
+}
+
+/// Encode a hidden header using a password-derived key (not K_master).
+fn encode_header_with_password(
+    payload: &HeaderPayload,
+    password: &[u8],
+    is_hidden: bool,
+    _k_master_hint: &[u8; 32],
+) -> Result<[u8; 512]> {
+    use crate::crypto::derive_key;
+    use crate::container::kdf_params_for_profile;
+    // The "hidden key" IS derived directly from the password.
+    // To store it in the header: we need a salt. encode_header generates a fresh salt
+    // internally, so we can't predict the key. Instead, use a two-pass approach:
+    // derive a temporary key from (password, random_salt), embed salt in header, use that key.
+    let mut salt = [0u8; 64];
+    rand::thread_rng().fill_bytes(&mut salt);
+    let mut kdf = kdf_params_for_profile(if payload.kdf_profile == 1 { "sensitive" } else { "interactive" });
+    kdf.salt = hex::encode(&salt);
+    let dk  = derive_key(password, &kdf)?;
+    let key: [u8; 32] = dk.as_array_32().unwrap();
+
+    // Build the header with this key
+    let mut buf = [0u8; 512];
+    buf[0..64].copy_from_slice(&salt);
+    buf[64] = payload.cipher as u8;
+    buf[65] = payload.kdf_profile;
+    buf[66] = payload.num_password_slots;
+    buf[67] = payload.num_key_slots;
+
+    let mut body = [0u8; crate::container::header::BODY_LEN];
+    body[0..4].copy_from_slice(b"VNM3");
+    body[4..8].copy_from_slice(&3u32.to_le_bytes());
+    body[8..16].copy_from_slice(&DATA_AREA_OFFSET.to_le_bytes());
+    body[16..24].copy_from_slice(&payload.outer_slots.to_le_bytes());
+    body[24..32].copy_from_slice(&payload.hidden_start.to_le_bytes());
+    body[32..40].copy_from_slice(&payload.root_slot.to_le_bytes());
+    body[40..48].copy_from_slice(&payload.created_at.to_le_bytes());
+    body[48..112].copy_from_slice(&payload.label);
+
+    let aad = if is_hidden { b"vnm:header:hidden:v3".as_ref() } else { b"vnm:header:outer:v3".as_ref() };
+    let enc = crate::crypto::encrypt_block(&key, payload.cipher, aad, &body)?;
+    buf[68..68 + enc.len()].copy_from_slice(&enc);
+    Ok(buf)
 }
