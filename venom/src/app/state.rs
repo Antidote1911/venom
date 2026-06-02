@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use crate::recent::RecentList;
 use crate::ui::{CreateView, MountView};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +41,10 @@ pub struct VenomApp {
     /// Cloned into mount threads so they can trigger a repaint.
     pub egui_ctx: egui::Context,
 
+    pub recent: RecentList,
+    /// Vault paths whose label/cipher have already been synced into `recent`.
+    recent_enriched: HashSet<String>,
+
     pub create_view: CreateView,
     pub mount_view: MountView,
 }
@@ -50,6 +56,8 @@ impl VenomApp {
             mounted: vec![],
             status_msg: None,
             egui_ctx: cc.egui_ctx.clone(),
+            recent: RecentList::load(),
+            recent_enriched: HashSet::new(),
             create_view: CreateView::default(),
             mount_view: MountView::default(),
         }
@@ -68,6 +76,29 @@ impl eframe::App for VenomApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Remove cards whose mount thread has exited cleanly.
         self.gc_gone_mounts();
+
+        // Enrich recent entries with label/cipher once the vault is fully open.
+        let updates: Vec<(String, Option<String>, String)> = self
+            .mounted
+            .iter()
+            .filter_map(|mv| {
+                if self.recent_enriched.contains(&mv.vault_path) {
+                    return None;
+                }
+                if let MountStatus::Mounted { label, cipher, .. } =
+                    &*mv.status.lock().unwrap()
+                {
+                    Some((mv.vault_path.clone(), label.clone(), cipher.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (path, label, cipher) in updates {
+            self.recent.update_metadata(&path, label, Some(cipher));
+            self.recent_enriched.insert(path);
+        }
 
         // Keep the UI animating while any vault is still connecting.
         let any_mounting = self.mounted.iter().any(|mv| {

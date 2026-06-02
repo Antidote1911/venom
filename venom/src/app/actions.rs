@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use vnmcore::container::CipherAlgorithm;
 use vnmcore::fs::Vault;
 use crate::app::state::{MountStatus, MountedVault, Screen, VenomApp};
+use crate::recent::read_cipher_from_bootstrap;
 
 impl VenomApp {
     // ── Create ────────────────────────────────────────────────────────────────
@@ -29,9 +30,17 @@ impl VenomApp {
         let profile = if v.high_security { "sensitive" } else { "interactive" };
         let label = if v.label.is_empty() { None } else { Some(v.label.clone()) };
 
-        match Vault::create(&v.vault_path, v.password.as_bytes(), cipher, profile, label) {
+        let vault_path = v.vault_path.clone();
+        let label_for_recent = label.clone();
+        let cipher_str = match cipher {
+            CipherAlgorithm::ChaCha20Poly1305 => "chacha20-poly1305",
+            CipherAlgorithm::Aes256Gcm        => "aes-256-gcm",
+        };
+
+        match Vault::create(&vault_path, v.password.as_bytes(), cipher, profile, label) {
             Ok(_) => {
-                self.set_status(format!("Vault created at {}", v.vault_path), false);
+                self.recent.add(&vault_path, label_for_recent, Some(cipher_str.into()));
+                self.set_status(format!("Vault created at {vault_path}"), false);
                 self.create_view = Default::default();
                 self.screen = Screen::VaultList;
             }
@@ -113,6 +122,11 @@ impl VenomApp {
             *status.lock().unwrap() =
                 MountStatus::Error("FUSE is only supported on Linux / macOS.".into());
         }
+
+        // Add to recent immediately with cipher from bootstrap (no KDF needed).
+        // Label will be enriched later by update() once the thread reports Mounted.
+        let cipher_hint = read_cipher_from_bootstrap(&v.vault_path);
+        self.recent.add(&v.vault_path, None, cipher_hint);
 
         self.mounted.push(MountedVault {
             vault_path: v.vault_path.clone(),

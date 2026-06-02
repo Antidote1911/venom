@@ -1,4 +1,5 @@
 mod app;
+mod recent;
 mod ui;
 
 fn main() -> eframe::Result<()> {

@@ -1,4 +1,4 @@
-use egui::{Color32, Frame, Margin, RichText, Vec2};
+use egui::{Color32, Frame, Margin, RichText, Rounding, Vec2};
 use crate::app::state::{VenomApp, Screen};
 use super::theme;
 
@@ -128,6 +128,87 @@ pub fn render(app: &mut VenomApp, ui: &mut egui::Ui) {
             app.clear_status();
         }
     });
+
+    // ── Recent vault quick-fill ───────────────────────────────────────────────
+    if !app.recent.is_empty() {
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Recent Vaults  —  click to fill vault path")
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
+        ui.add_space(6.0);
+
+        let entries = app.recent.entries.clone();
+        let mut fill_path: Option<String> = None;
+
+        egui::ScrollArea::vertical()
+            .max_height(160.0)
+            .id_source("recent_mount")
+            .show(ui, |ui| {
+                for entry in &entries {
+                    let selected = app.mount_view.vault_path == entry.path;
+                    let exists   = std::path::Path::new(&entry.path).exists();
+
+                    let bg = if selected { Color32::from_rgb(25, 40, 65) } else { theme::CARD };
+                    let border = if selected { theme::ACCENT } else { theme::BORDER };
+
+                    let resp = Frame::none()
+                        .fill(bg)
+                        .stroke(egui::Stroke::new(1.0, border))
+                        .rounding(Rounding::same(6.0))
+                        .inner_margin(Margin::symmetric(10.0, 6.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    let color = if exists { theme::TEXT } else { theme::TEXT_MUTED };
+                                    ui.label(
+                                        RichText::new(entry.display_name())
+                                            .strong()
+                                            .small()
+                                            .color(color),
+                                    );
+                                    ui.label(
+                                        RichText::new(&entry.path)
+                                            .small()
+                                            .monospace()
+                                            .color(theme::TEXT_MUTED),
+                                    );
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if let Some(c) = &entry.cipher {
+                                            ui.label(
+                                                RichText::new(c).small().color(theme::ACCENT),
+                                            );
+                                        }
+                                        if !exists {
+                                            ui.label(
+                                                RichText::new("not found")
+                                                    .small()
+                                                    .color(theme::ERROR),
+                                            );
+                                        }
+                                    },
+                                );
+                            });
+                        });
+
+                    if resp.response.interact(egui::Sense::click()).clicked() && exists {
+                        fill_path = Some(entry.path.clone());
+                    }
+                    ui.add_space(3.0);
+                }
+            });
+
+        if let Some(p) = fill_path {
+            app.mount_view.vault_path = p;
+        }
+    }
 }
 
 fn labeled_field(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui)) {

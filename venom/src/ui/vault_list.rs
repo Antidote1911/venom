@@ -1,5 +1,6 @@
 use egui::{Color32, Frame, Margin, RichText, Rounding, Ui, Vec2};
 use crate::app::state::{MountStatus, VenomApp, Screen};
+use crate::recent::RecentVault;
 use super::theme;
 
 #[derive(Default)]
@@ -41,14 +42,40 @@ pub fn render(app: &mut VenomApp, ui: &mut Ui) {
 
     // ── Empty state ───────────────────────────────────────────────────────────
     if app.mounted.is_empty() {
-        empty_state(ui);
+        let mut quick_mount: Option<String> = None;
+        let mut remove_recent: Option<String> = None;
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            empty_hero(ui);
+
+            if !app.recent.is_empty() {
+                ui.add_space(8.0);
+                recent_section(ui, &app.recent.entries.clone(),
+                    &mut quick_mount, &mut remove_recent);
+            }
+        });
+
+        if let Some(path) = quick_mount {
+            app.mount_view.vault_path = path;
+            app.screen = Screen::Mount;
+        }
+        if let Some(path) = remove_recent {
+            app.recent.remove(&path);
+        }
         return;
     }
 
-    // ── Vault cards ───────────────────────────────────────────────────────────
+    // ── Active vault cards ────────────────────────────────────────────────────
     let mut to_unmount: Option<usize> = None;
     let mut to_dismiss: Option<usize> = None;
     let mut to_open: Option<String>   = None;
+    let mut quick_mount: Option<String> = None;
+    let mut remove_recent: Option<String> = None;
+
+    // Paths currently mounted — used to dim them in the recent list.
+    let mounted_paths: Vec<String> = app.mounted.iter()
+        .map(|mv| mv.vault_path.clone())
+        .collect();
 
     egui::ScrollArea::vertical()
         .max_height(ui.available_height() - 8.0)
@@ -66,11 +93,31 @@ pub fn render(app: &mut VenomApp, ui: &mut Ui) {
                 );
                 ui.add_space(8.0);
             }
+
+            // Recent vaults that are NOT currently mounted
+            let unmounted_recent: Vec<RecentVault> = app.recent.entries
+                .iter()
+                .filter(|e| !mounted_paths.contains(&e.path))
+                .cloned()
+                .collect();
+
+            if !unmounted_recent.is_empty() {
+                ui.add_space(4.0);
+                recent_section(ui, &unmounted_recent,
+                    &mut quick_mount, &mut remove_recent);
+            }
         });
 
     if let Some(i) = to_unmount { app.action_unmount(i); }
     if let Some(i) = to_dismiss { app.action_dismiss_error(i); }
     if let Some(p) = to_open    { app.action_open_folder(&p); }
+    if let Some(path) = quick_mount {
+        app.mount_view.vault_path = path;
+        app.screen = Screen::Mount;
+    }
+    if let Some(path) = remove_recent {
+        app.recent.remove(&path);
+    }
 }
 
 // ── Vault card ────────────────────────────────────────────────────────────────
@@ -222,32 +269,121 @@ fn vault_card(
         });
 }
 
-// ── Empty state ───────────────────────────────────────────────────────────────
+// ── Empty hero ────────────────────────────────────────────────────────────────
 
-fn empty_state(ui: &mut Ui) {
-    let avail = ui.available_size();
-    ui.allocate_ui_with_layout(
-        avail,
-        egui::Layout::centered_and_justified(egui::Direction::TopDown),
-        |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(avail.y * 0.20);
-                ui.label(RichText::new("🔒").size(52.0));
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new("No vaults mounted")
-                        .size(18.0)
-                        .color(theme::TEXT_MUTED),
-                );
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new("Create a new vault or mount an existing one to get started.")
-                        .color(theme::TEXT_MUTED)
-                        .small(),
-                );
-            });
-        },
+fn empty_hero(ui: &mut Ui) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(24.0);
+        ui.label(RichText::new("🔒").size(48.0));
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("No vaults mounted")
+                .size(17.0)
+                .color(theme::TEXT_MUTED),
+        );
+        ui.label(
+            RichText::new("Create a new vault or mount an existing one.")
+                .color(theme::TEXT_MUTED)
+                .small(),
+        );
+    });
+}
+
+// ── Recent vaults section ─────────────────────────────────────────────────────
+
+fn recent_section(
+    ui: &mut Ui,
+    entries: &[RecentVault],
+    quick_mount: &mut Option<String>,
+    remove: &mut Option<String>,
+) {
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new("Recent Vaults")
+            .small()
+            .strong()
+            .color(theme::TEXT_MUTED),
     );
+    ui.add_space(6.0);
+
+    for entry in entries {
+        recent_row(ui, entry, quick_mount, remove);
+        ui.add_space(4.0);
+    }
+}
+
+fn recent_row(
+    ui: &mut Ui,
+    entry: &RecentVault,
+    quick_mount: &mut Option<String>,
+    remove: &mut Option<String>,
+) {
+    let exists = std::path::Path::new(&entry.path).exists();
+
+    Frame::none()
+        .fill(theme::CARD)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .rounding(Rounding::same(8.0))
+        .inner_margin(Margin::symmetric(12.0, 8.0))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                // ── Info ──────────────────────────────────────────────────────
+                ui.vertical(|ui| {
+                    let name_color = if exists { theme::TEXT } else { theme::TEXT_MUTED };
+                    ui.label(
+                        RichText::new(entry.display_name())
+                            .strong()
+                            .color(name_color),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(&entry.path)
+                                .small()
+                                .monospace()
+                                .color(theme::TEXT_MUTED),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        if let Some(cipher) = &entry.cipher {
+                            pill(ui, cipher, theme::ACCENT);
+                            ui.add_space(4.0);
+                        }
+                        if !exists {
+                            pill(ui, "not found", theme::ERROR);
+                        }
+                        ui.label(
+                            RichText::new(format_ts(entry.last_used))
+                                .small()
+                                .color(theme::TEXT_MUTED),
+                        );
+                    });
+                });
+
+                // ── Buttons ───────────────────────────────────────────────────
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(egui::Button::new(
+                            RichText::new("✕").color(theme::TEXT_MUTED).small(),
+                        ).frame(false))
+                        .on_hover_text("Remove from recent list")
+                        .clicked()
+                    {
+                        *remove = Some(entry.path.clone());
+                    }
+                    ui.add_space(6.0);
+                    let btn = egui::Button::new(
+                        RichText::new("Mount").color(Color32::WHITE),
+                    )
+                    .fill(if exists { theme::BTN_PRIMARY } else { theme::CARD })
+                    .min_size(Vec2::new(72.0, 26.0));
+                    if ui.add_enabled(exists, btn).clicked() {
+                        *quick_mount = Some(entry.path.clone());
+                    }
+                });
+            });
+        });
 }
 
 // ── Small helpers ─────────────────────────────────────────────────────────────
