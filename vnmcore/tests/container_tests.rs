@@ -7,7 +7,7 @@ use vnmcore::{kem_generate, kem_ek_from_seed};
 const MB: u64 = 1024 * 1024;
 
 fn tmp(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("vnm3_{name}_{}.vnm", std::process::id()))
+    std::env::temp_dir().join(format!("vnm_{name}_{}.vnm", std::process::id()))
 }
 
 // ── Basic create / open ───────────────────────────────────────────────────────
@@ -68,13 +68,13 @@ fn write_and_read_file_node() {
     let _ = std::fs::remove_file(&path);
     let c = VnmContainer::create(&path, b"pass", 4*MB, CipherAlgorithm::Aes256Gcm,
         "interactive", None, None).unwrap();
-    let content = b"Hello, Venom v3!".to_vec();
+    let content = b"Hello, Venom!".to_vec();
     let file = VaultNode::File(FileBlock {
         kind: NodeKind::File, total_size: content.len() as u64, next_slot: None, data: content.clone(),
     });
     let slot = c.write_node(&file).unwrap();
     match c.read_node(slot).unwrap() {
-        VaultNode::File(f) => { assert_eq!(f.data, content); assert_eq!(f.total_size, 16); }
+        VaultNode::File(f) => { assert_eq!(f.data, content); assert_eq!(f.total_size, content.len() as u64); }
         _ => panic!("expected file"),
     }
     std::fs::remove_file(&path).ok();

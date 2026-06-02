@@ -8,13 +8,13 @@
 //!   [33..101] VNMB encrypted K_master (68 bytes = 36 VNMB header + 32 K_master + 16 tag + 16 tag)
 //!             Wait, let me recount: encrypt_block output = 4(magic)+4(ver)+12(nonce)+plaintext+16(tag)
 //!             = 36 + 32 = 68 bytes total
-//!             AAD: b"vnm:pw:v3"
+//!             AAD: b"vnm:pw:v1"
 //!
 //! KeySlot (1644 bytes):
 //!   [0..8]      fingerprint   — SHA256(ek)[0..8], for quick matching
 //!   [8..1576]   ML-KEM-1024 ciphertext (1568 bytes)
 //!   [1576..1644] VNMB encrypted K_master (68 bytes)
-//!               AAD: b"vnm:key:v3"
+//!               AAD: b"vnm:key:v1"
 
 use crate::{Result, VnmError};
 use crate::container::{CipherAlgorithm, kdf_params_for_profile_id};
@@ -25,8 +25,8 @@ const VNMB_ENCRYPTED_32: usize = 68; // 4+4+12+32+16
 pub const PW_SLOT_SIZE:  usize = 32 + 1 + VNMB_ENCRYPTED_32;  // = 101
 pub const KEY_SLOT_SIZE: usize = 8 + CT_SIZE + VNMB_ENCRYPTED_32;  // = 1644
 
-const AAD_PW:  &[u8] = b"vnm:pw:v3";
-const AAD_KEY: &[u8] = b"vnm:key:v3";
+const AAD_PW:  &[u8] = b"vnm:pw:v1";
+const AAD_KEY: &[u8] = b"vnm:key:v1";
 
 // ── Password slot ─────────────────────────────────────────────────────────────
 

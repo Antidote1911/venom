@@ -8,7 +8,8 @@ Venom is a cryptographic container filesystem written in Rust, inspired by VeraC
 A container is a **single opaque file** (`.vnm`). Its entire content is encrypted —
 an attacker who sees the file cannot determine how many files are stored inside, their
 names, sizes, or directory structure. The same file can host two independent volumes
-(plausible deniability).
+(plausible deniability) and can be decrypted by multiple independent recipients,
+each with their own credential (password or post-quantum private key).
 
 ### Workspace layout
 
@@ -16,179 +17,172 @@ names, sizes, or directory structure. The same file can host two independent vol
 venom/
 ├── vnmcore/      Core library: crypto, slot store, virtual filesystem, OS drivers
 │   ├── src/
-│   │   ├── container/   CipherAlgorithm, KdfParams, on-disk header format
-│   │   ├── crypto/      Argon2id KDF, AES-256-GCM / ChaCha20-Poly1305 AEAD
+│   │   ├── container/   header v3, CipherAlgorithm, KdfParams, recipient slots
+│   │   ├── crypto/      Argon2id KDF, AES-256-GCM / ChaCha20-Poly1305, ML-KEM-1024
 │   │   ├── storage/     SlotStore, VaultNode, DirectoryBlock, FileBlock
-│   │   └── fs/          VnmContainer API, FUSE driver (Unix), WinFSP driver (Windows)
-│   ├── tests/           26 integration tests
+│   │   └── fs/          VnmContainer API, FUSE (Unix), WinFSP (Windows)
+│   ├── tests/           27 integration tests
 │   └── examples/        mount_test — diagnostic CLI tool
 └── venom/        GUI application (egui 0.28 / eframe)
     └── src/
         ├── app/         state, actions (platform-agnostic mount dispatch)
-        ├── ui/          theme, topbar, vault_list, create, mount, statusbar
-        └── recent.rs    recent-containers persistence (~/.config/venom/recent.json)
+        ├── ui/          theme, topbar, vault_list, create, mount, recipients, statusbar
+        └── recent.rs    recent-containers (~/.config/venom/recent.json)
 ```
 
 ---
 
 ## Done
 
-### Container format — `.vnm` single file
+### Container format v3 — `.vnm` single file
 
 ```
-[0..512]     Outer header  — encrypted with outer password
-[512..1024]  Hidden header — encrypted with hidden password (random bytes if unused)
-[1024..]     Data area: fixed-size slots (32 KB each)
-             Outer volume:  slots [0..outer_limit)  (slot 0 = alloc bitmap)
-             Hidden volume: slots [outer_limit..N)  (slot N-1 = hidden alloc bitmap)
+[0..512]                   Outer header (VNM3) — encrypted with K_master
+[512..1024]                Random reserved bytes (no header here — deniability)
+[1024..14984]              Recipient area (fixed, 13 960 bytes):
+  8 × 101 B  Password slots  salt(32) + kdf_profile(1) + AEAD(K_master)
+  8 × 1644 B ML-KEM slots    fingerprint(8) + KEM_ct(1568) + AEAD(K_master)
+[14984..]                  Data slots (32 KB each)
+[end-512..end]             Hidden header (VNM3) or random bytes
 ```
 
-- [x] **Slot on-disk layout** — `u32_LE(encrypted_len)` prefix + VNMB block
-  (magic + version + nonce + ciphertext + AEAD tag) + zero padding to 32 KB.
-  Length prefix required so `decrypt_block` finds the exact AEAD tag boundary.
-- [x] **Header format** — 512 bytes each:
-  `salt(32) + cipher_id(1) + KDF_params(12) + nonce(12) + encrypted_body(439 B)`.
-  KDF params stored in plaintext so the key can be derived before decryption.
-  AAD distinguishes header type (`vnm:outer:v1` / `vnm:hidden:v1`).
-- [x] **Slot encryption** — master key (random 32 bytes, stored encrypted in header);
-  slot index as AAD → prevents cross-volume slot substitution attacks.
-- [x] **Allocation bitmap** — compact bit-per-slot bitmap in slot 0 (outer) and
-  last slot (hidden). Replaces a `Vec<u64>` free list which exceeds the 32 KB slot
-  limit for containers ≥ ~500 MB. Sizes: 500 MB → 2 KB; 8 GB → 32 KB.
-- [x] **Pre-allocation with random bytes** — entire file filled with random data
-  before headers are written (required for plausible deniability).
-- [x] **Ciphers** — ChaCha20-Poly1305 and AES-256-GCM (chosen at creation)
-- [x] **Key derivation** — Argon2id, two profiles:
+**Key design principle**: `K_master` is a random 32-byte key, never derived from
+a password. Credentials (password, private key) only decrypt `K_master`. This means
+adding or revoking a recipient **never re-encrypts any data**.
+
+- [x] **Slot on-disk layout** — `u32_LE(len)` prefix + VNMB block (magic + version +
+  nonce + ciphertext + AEAD tag) + zero padding to 32 KB.
+  Prefix is required so `decrypt_block` finds the exact AEAD tag boundary.
+- [x] **Header format v3** (512 B):
+  `salt(64) + cipher_id(1) + kdf_profile(1) + n_pw(1) + n_key(1) + nonce_area(8) + enc_body(432 B)`.
+  - Salt increased to **64 bytes** (matches VeraCrypt, was 32)
+  - KDF params **not exposed** — only a 1-byte profile ID (0=interactive, 1=sensitive);
+    exact Argon2id parameters hardcoded per profile, not attacker-visible
+  - Header body encrypted with `K_master` (not with password-derived key), bound with
+    AAD `"vnm:header:outer:v3"` / `"vnm:header:hidden:v3"`
+- [x] **Slot encryption** — master key (random 32 B, stored in recipient slots);
+  slot index as AAD → prevents cross-volume slot substitution
+- [x] **Allocation bitmap** — compact bit-per-slot in slot 0 (outer) / last slot (hidden).
+  500 MB → 2 KB bitmap; 8 GB → 32 KB (practical per-volume limit)
+- [x] **Pre-allocation with random bytes** — deniability requirement
+- [x] **Ciphers** — ChaCha20-Poly1305 and AES-256-GCM
+- [x] **Key derivation** — Argon2id (RFC 9106, PHC winner):
   - Interactive: 64 MiB / 3 iterations (< 1 s)
   - Sensitive: 256 MiB / 4 iterations (2–5 s)
-- [x] **Linked-list file chain** — `FileBlock.next_slot: Option<u64>` replaces the
-  old flat `continuation_slots: Vec<u64>`. Keeps every slot payload ≤ 30 KB
-  regardless of file size. Fixes crash when copying large files (e.g., MP4 videos)
-  where the flat list exceeded the 32 KB slot limit.
-- [x] **Serialization: MessagePack** (`rmp-serde 1.3`) replaces `bincode`.
-  Uses `to_vec_named` (string field keys) — readable from any language with a
-  MessagePack library (Python, Go, C#, Java…). Allocation bitmap remains custom
-  binary (no serde, more compact).
+- [x] **Linked-list file chain** — `FileBlock.next_slot: Option<u64>`.
+  Fixes large-file crash (flat `Vec<u64>` of continuation indices exceeded 32 KB)
+- [x] **Serialization: MessagePack** (`rmp-serde`, named fields) — readable from
+  Python, Go, C#, Java…; allocation bitmap stays custom binary
+
+### Security hardening vs VeraCrypt
+
+| Property | VeraCrypt | Venom |
+|---|:---:|:---:|
+| Per-slot integrity (AEAD) | ✗ XTS | ✓ |
+| Argon2id KDF (memory-hard) | ✗ PBKDF2 | ✓ |
+| Deleted slot wipe | ✗ | ✓ |
+| Random nonce per write | ✗ XTS deterministic | ✓ |
+| Salt 64 bytes | ✓ | ✓ |
+| KDF params hidden | ~ trial | ~ profile ID |
+| Hidden volume deniability | ✓ | ✓ |
+| Multi-recipient (ML-KEM) | ✗ | ✓ |
+| Header backup | ✓ | ✗ TODO |
+
+Full comparison: see `SECURITY.md`.
+
+### Multi-recipient containers (post-quantum)
+
+- [x] **ML-KEM-1024** (NIST FIPS 203, Category 5 — ~256-bit post-quantum security)
+  via `ml-kem 0.3` (pure Rust, `getrandom` feature)
+- [x] **Key types**: Seed (64 B private), EncapKey (1568 B public), Ciphertext (1568 B)
+- [x] **`kem::generate()`** → `(seed, encap_key)`
+- [x] **`kem::encapsulate(ek)`** → `(ciphertext, shared_secret_32B)`
+- [x] **`kem::decapsulate(seed, ct)`** → `shared_secret_32B`
+- [x] **`kem::fingerprint(ek)`** → `SHA-256(ek)[0..8]` for quick slot matching
+- [x] **Password slots** — up to 8 per container; each has its own Argon2id salt
+- [x] **ML-KEM slots** — up to 8 per container; fingerprint enables fast rejection
+- [x] **`VnmContainer::open(path, OpenCredential::Password(pw))`**
+- [x] **`VnmContainer::open(path, OpenCredential::PrivateKey(&seed))`**
+- [x] **`add_key_recipient(&encap_key)`** — adds ML-KEM slot, no data re-encryption
+- [x] **`add_password_recipient(&pw)`** — adds password slot
+- [x] **`remove_key_recipient(&fingerprint)`** — revokes by fingerprint, wipes slot
+- [x] **`list_recipients()`** — returns slot type + fingerprint for each slot
 
 ### Interoperability
 
-| Layer | Format | Notes |
-|-------|--------|-------|
-| Header | Custom binary (fixed layout, LE integers) | Easy to implement in any language |
-| Slot crypto | Standard AEAD (AES-256-GCM or ChaCha20-Poly1305) | IETF RFCs |
-| KDF | Argon2id | IETF RFC 9106 |
-| VaultNode payload | MessagePack (named fields) | Libraries in 50+ languages |
+| Layer | Format | Portability |
+|---|---|---|
+| Header | Custom binary (fixed LE layout) | Any language |
+| Slot crypto | AES-256-GCM or ChaCha20-Poly1305 | IETF RFCs |
+| KDF | Argon2id | RFC 9106, 50+ language libs |
+| ML-KEM | FIPS 203 standard | Growing ecosystem |
+| VaultNode payload | MessagePack (named fields) | 50+ language libs |
 
 ### Hidden volume (plausible deniability)
 
-- [x] **Two-password design** — same `.vnm` file, two independent encrypted volumes.
-  Outer password → outer filesystem. Hidden password → hidden filesystem.
+- [x] **Two-password design** — same `.vnm`, two independent encrypted volumes.
   Neither volume can prove the other exists.
-- [x] **Independent master keys** — each volume has its own random 32-byte master key;
-  slots of one volume cannot be decrypted with the other's key.
-- [x] **Automatic detection in `VnmContainer::open`** — tries outer header first,
-  then hidden. The caller provides a password; the correct volume is selected
-  transparently.
-- [x] **Slot partitioning** — outer `[0..outer_limit)`, hidden `[outer_limit..total)`.
-  Each volume is unaware of the other.
-- [x] **GUI** — Create form has a collapsible "Hidden volume" section (size, label,
-  passphrase + confirm, live validation).
+- [x] **Hidden header at `file_end − 512`** — outer header does not reference the
+  hidden area; the file appears as a normal container with slack space at the end
+- [x] **Outer claims only its own capacity** — `total_slots` in outer header = outer slots
+  only, hides the existence of the hidden volume from the outer volume user
+- [x] **Independent master keys** — slots of one volume cannot be decrypted with the other
+- [x] **Automatic detection** — `VnmContainer::open` tries outer header, then hidden
+- [x] **GUI** — collapsible hidden volume section in Create form
 
 ### VnmContainer API
 
-- [x] `VnmContainer::create(path, password, size_bytes, cipher, kdf, label, hidden_opts)`
-- [x] `VnmContainer::open(path, password)` — auto-detects outer / hidden
-- [x] `read_node(slot)`, `write_node(node)`, `update_node(slot, node)`, `free_node(slot)`
-- [x] `flush()` — persists allocation bitmap + file buffers to disk
+```rust
+VnmContainer::create(path, password, size, cipher, kdf, label, hidden_opts)
+VnmContainer::open(path, OpenCredential::Password(pw))
+VnmContainer::open(path, OpenCredential::PrivateKey(&seed))
+container.add_key_recipient(&encap_key)
+container.remove_key_recipient(&fingerprint)
+container.add_password_recipient(&new_password)
+container.list_recipients() -> Vec<RecipientInfo>
+container.read_node(slot) / write_node(node) / update_node(slot, node) / free_node(slot)
+container.flush()
+```
 
 ### FUSE driver — Linux / macOS (`fs/fuse.rs`)
 
-- [x] **op_* architecture** — pure business-logic methods (`Result<T, errno>`),
-  testable without mounting; thin `Filesystem` wrappers call them.
-- [x] **Read** — `lookup`, `getattr`, `readdir`, `read`
-- [x] **Write** — `mkdir`, `rmdir`, `create`, `unlink`, `rename`, `write`, `setattr`
-- [x] **In-memory file cache** — `open` loads all slots; `write` patches cache + dirty;
-  `flush`/`release` persists only if dirty; `Drop` calls `flush_all()`.
-- [x] **Multi-slot files** — linked-list chain; old slots wiped on flush.
-- [x] **`FOPEN_DIRECT_IO`** — bypasses kernel page cache; eliminates `fh=0` writeback
-  EIO (Thunar/XFCE "erreur d'entrée/sortie" bug, `.goutputstream-*` residues).
-- [x] **`statfs()`** — reports real free slots × 32 KB.
-- [x] **Forward secrecy on free** — freed slots overwritten with random bytes.
-- [x] **Mount options** — `AllowOther` + `AutoUnmount` removed (EPERM on modern Linux).
+- [x] `op_*` architecture (testable without mounting), thin `Filesystem` wrappers
+- [x] Read: `lookup`, `getattr`, `readdir`, `read`
+- [x] Write: `mkdir`, `rmdir`, `create`, `unlink`, `rename`, `write`, `setattr`
+- [x] In-memory file cache; `FOPEN_DIRECT_IO`; `statfs()`; forward secrecy on free
+- [x] Mount options hardened (`AllowOther` + `AutoUnmount` removed)
 
 ### WinFSP driver — Windows (`fs/winfsp.rs`)
 
-Implements `winfsp 0.13` `FileSystemContext` trait, providing a native Windows
-filesystem backed by the same `.vnm` container format:
+- [x] `winfsp 0.13` `FileSystemContext` trait; `Mutex<Inner>` for multi-threading
+- [x] All core ops: `create`, `open`, `close`, `read`, `write`, `flush`, `rename`,
+  `set_delete`, `cleanup`, `read_directory`, `get_volume_info`
+- [x] Case-insensitive path resolution, Windows FILETIME, drive-letter mount points
+- [x] Requires WinFSP installed (https://winfsp.dev)
 
-- [x] **Required methods** — `get_security_by_name`, `open`, `close`
-- [x] **File operations** — `create`, `read`, `write`, `flush`, `set_file_size`,
-  `get_file_info`, `set_basic_info`
-- [x] **Directory operations** — `read_directory` (populates Explorer's file list)
-- [x] **Delete / rename** — `set_delete` (deferred deletion via `pending_delete`),
-  `cleanup` (FspCleanupDelete flag), `rename` (case-insensitive, cross-directory)
-- [x] **Volume info** — `get_volume_info` reports real free space
-- [x] **In-memory cache** — same `HashMap<u64, OpenFile>` pattern as FUSE;
-  `Mutex<Inner>` for WinFSP's multi-threaded model
-- [x] **Path resolution** — `resolve()` walks the VaultNode tree using Windows
-  backslash paths (case-insensitive, compatible with Explorer and command prompt)
-- [x] **Windows timestamps** — Unix seconds → FILETIME (100 ns since 1601-01-01)
-- [x] **Mount point** — drive letter (`V:`) or empty directory path
-- [x] **Unmount** — `net use <mp> /delete` + `winfsp.exe /unmount` fallback
-- [x] **Requires** — WinFSP installed (https://winfsp.dev, free, MIT licence)
-
-### Platform dispatch (`venom/src/app/actions.rs`)
-
-- [x] `mount_thread()` — unified background thread for all platforms
-- [x] `platform_mount()`:
-  - `#[cfg(target_family = "unix")]` → FUSE
-  - `#[cfg(target_os = "windows")]` → WinFSP
-- [x] GUI mount form — `📄 Open file` button (blue) vs `📁 Folder…` (neutral);
-  distinct labels prevent confusion between container file and mountpoint pickers.
-
-### Tests — 26 total, all passing
+### Tests — 27 total, all passing
 
 | Suite | Count | Covers |
 |-------|------:|--------|
-| `crypto_tests` | 8 | ChaCha20/AES round-trip, wrong key, AAD binding, tamper detection, KDF determinism, nonce uniqueness |
-| `container_tests` | 9 | create/open both ciphers, wrong password, root dir, CRUD nodes, data persistence, hidden volume (both-password mount), outer/hidden independence |
-| `fuse_cache_tests` (inline) | 9 | cache lifecycle + **large_file_linked_chain_roundtrip** (75 KB across 3 slots, verifies linked-list fix) |
+| `crypto_tests` | 8 | ChaCha20/AES round-trip, wrong key, AAD binding, tamper detection, KDF, nonces |
+| `container_tests` | 10 | create/open both ciphers, wrong password, root dir, CRUD, persistence, hidden volume, **ML-KEM generate/encap/decap round-trip**, **add ML-KEM recipient + open with private key**, **multiple ML-KEM recipients** |
+| `fuse_cache_tests` (inline) | 9 | cache lifecycle + large file linked-list (75 KB / 3 slots) |
 
 ### GUI (egui 0.28)
 
-#### Create
-- [x] Two-column layout: path + label + size + passphrase | cipher + KDF + hidden volume
-- [x] `💾 Save as…` file browser, auto-appends `.vnm` if extension missing
-- [x] Password match indicator (✓/✗ inline)
-- [x] KDF profile cards (Interactive / Sensitive)
-- [x] Hidden volume section: collapsible, live size validation
-- [x] "Create container" disabled until form is valid
-- [x] Warning about random-fill time for large containers
-
-#### Mount
-- [x] `📄 Open file` (blue) opens `.vnm` file picker with title + "All files" fallback
-- [x] `📁 Folder…` (neutral) opens directory picker for mountpoint
-- [x] Single passphrase field — auto-selects outer or hidden volume
-- [x] Info panel: how-it-works + hidden volume note + prerequisites
-- [x] Recent containers quick-fill panel
-
-#### Mount lifecycle
-- [x] Async `mount_thread()` (all platforms); KDF + OS mount never block UI thread
-- [x] Status: `Mounting` → `Mounted` (green + `🔐 hidden` badge) → `Gone` → `Error`
-- [x] `gc_gone_mounts()` each frame removes cleanly-unmounted cards
-
-#### Unmount / open folder
-- [x] Linux: `fusermount3` → `fusermount` fallback
-- [x] Windows: `net use /delete` → `winfsp.exe /unmount` fallback
-- [x] Open folder: `xdg-open` → nautilus → dolphin → thunar → nemo → pcmanfm → caja
-- [x] Path existence check before attempting to open
-
-#### Recent containers (`~/.config/venom/recent.json`)
-- [x] Up to 10 entries; cipher read without KDF; label enriched post-mount
-- [x] Empty state, non-empty list, mount form quick-fill
-
-#### UI design
-- [x] Custom dark theme + topbar badges
+- [x] Create: two-column layout, size field, hidden volume section, save-as browser
+- [x] Mount: file picker (`📄 Open file`), `📁 Folder…`, single passphrase field
+- [x] **Recipients screen** (`👥 Recipients` button on mounted vault cards):
+  - List current slots (password + ML-KEM with fingerprint)
+  - Add password recipient
+  - Add ML-KEM recipient (browse `.vpub` file)
+  - Remove ML-KEM recipient by fingerprint
+  - **Generate ML-KEM-1024 keypair** → `.vpub` (public) + `.vpriv` (seed)
+- [x] Async mount thread; `Mounting → Mounted → Gone / Error` state machine
+- [x] `🔐 hidden` badge for hidden-volume mounts
+- [x] Open folder fallback chain; path existence check
+- [x] Recent containers (up to 10, JSON, cipher hint without KDF)
+- [x] Custom dark theme
 
 ---
 
@@ -196,75 +190,65 @@ filesystem backed by the same `.vnm` container format:
 
 ### Container format / security
 
-- [ ] **Write atomicity** — crash between freeing old continuation slots and writing
-  new ones can corrupt a file. Needs write-ahead log or copy-on-write.
-- [ ] **Integrity manifest** — no global HMAC of the allocation bitmap; an attacker
-  could flip bits to block access to specific slots.
-- [ ] **Volume size limit** — allocation bitmap must fit in one slot (≈ 8 GB per
-  volume). Larger containers require a multi-slot bitmap or B-tree allocator.
-- [ ] **Password zeroization** — `CreateView::password` and `MountView::password`
-  are plain `String`; should be zeroized after the mount/create thread receives them.
-- [ ] **Async create** — random-fill + KDF blocks the UI thread (up to 30 s for a
-  large sensitive-profile container). Should use a progress-reporting async pattern.
+- [ ] **Recipients screen: K_master access** — currently the GUI `add_key_recipient`
+  / `remove_key_recipient` require K_master, which is only available right after open.
+  The GUI needs to either re-open the container or store K_master in the mount state.
+- [ ] **Write atomicity** — crash between freeing and writing continuation slots
+  can corrupt a file. Needs WAL or copy-on-write.
+- [ ] **Integrity manifest** — no global HMAC over the allocation bitmap.
+- [ ] **Volume size limit** — bitmap must fit in one slot (≈ 8 GB per volume).
+- [ ] **Password zeroization** — `CreateView::password` / `MountView::password`
+  should be zeroized after use.
+- [ ] **Async create** — random-fill + KDF blocks the UI thread for large containers.
+- [ ] **Header backup** — single header per volume; corruption = total data loss.
+  VeraCrypt keeps a backup copy.
 
 ### FUSE / filesystem
 
-- [ ] **Hard links / symlinks** — `link` and `symlink` not implemented
-- [ ] **Extended attributes** — `getxattr` / `setxattr` not implemented
-- [ ] **File timestamps** — always `UNIX_EPOCH`; no persistent storage in slots
-- [ ] **Permissions** — hardcoded 0o755/0o644; no persistent ACL
-- [ ] **Large directory performance** — `readdir` re-reads the directory slot on
-  every call; no in-memory directory cache
+- [ ] Hard links / symlinks, extended attributes, file timestamps, persistent ACLs
+- [ ] Large directory cache (`readdir` re-reads on every call)
 
 ### WinFSP driver
 
-- [ ] **Windows smoke test** — actual mount + file copy + unmount on a Windows CI runner
-- [ ] **WinFSP error mapping** — not all `FspError` codes map cleanly to our
-  `VnmError`; edge cases (e.g., path-too-long, sharing violations) need validation
-- [ ] **macOS WinFSP equivalent** — macFUSE path is implemented but not tested on CI
+- [ ] Windows smoke test on real hardware / CI runner
+- [ ] WinFSP error mapping edge cases
 
 ### GUI
 
-- [ ] **Progress bar during create** — show spinner + elapsed time at minimum
-- [ ] **Outer safe-fill warning** — alert user when outer volume nears `outer_limit`
-  (risk of overwriting hidden volume data)
-- [ ] **Vault browser panel** — show mounted directory tree inside the app
-- [ ] **Tray icon** — mounted count; unmount from tray menu
-- [ ] **Auto-unmount on idle**
-- [ ] **CLI mode** — `venom mount <file.vnm> <mp> [--password-stdin]`
+- [ ] Progress bar during create (random-fill can take 30+ s for large containers)
+- [ ] Outer safe-fill warning when hidden volume exists
+- [ ] Vault browser panel, tray icon, auto-unmount on idle
+- [ ] CLI mode (`venom mount <file.vnm> <mp> --password-stdin`)
 
 ### Testing & CI
 
-- [ ] **Restore `fuse_ops_tests`** — 29 integration tests for the FUSE op_* surface
-  were lost during the format migration; needs rewrite for the `u64` slot-based API
-- [ ] **Property-based tests** — `proptest` for crypto round-trips
-- [ ] **FUSE mount smoke test** — CI job: create, mount, write file, read back, unmount
-- [ ] **Benchmarks** — encrypt/decrypt throughput; KDF timing
+- [ ] Restore `fuse_ops_tests` (29 tests lost during format migration)
+- [ ] Property-based tests (`proptest`)
+- [ ] FUSE mount smoke test (CI with fuse3)
+- [ ] Benchmarks
 
 ### Distribution
 
-- [ ] **GitHub Actions CI** — `cargo test` + `cargo clippy` + `cargo fmt --check`
-- [ ] **Release packaging** — Flatpak/AppImage (Linux), `.app` (macOS), installer (Windows)
-- [ ] **`CHANGELOG.md`** and semantic versioning
+- [ ] GitHub Actions CI
+- [ ] Release packaging (Flatpak/AppImage, `.app`, Windows installer)
+- [ ] `CHANGELOG.md` and semantic versioning
 
 ---
 
 ## Known limitations
 
-1. **Single-process mount (Unix)** — if the GUI crashes (`SIGSEGV`), the FUSE thread
-   dies and dirty cached data is lost. Normal exits flush correctly via `Drop`.
-2. **Owner-only mounts (Unix)** — `AllowOther` removed; other users on the machine
-   cannot access the mountpoint.
-3. **Full-file RAM loading** — entire files are decrypted into memory on `open()`.
-   A 500 MB file consumes 500 MB of RSS. Streaming is not implemented.
-4. **Password copy in thread** — password bytes cloned as `Vec<u8>`, dropped after
-   `VnmContainer::open`. No explicit `zeroize` on the copy.
-5. **Recent list stores plaintext paths** — `~/.config/venom/recent.json` reveals
-   container file locations on disk (no vault content, but existence is visible).
-6. **`.goutputstream-*` residues (Unix)** — GIO atomic saves leave temp files if
-   they fail mid-way. Fixed with `FOPEN_DIRECT_IO`. Clean up existing ones:
+1. **Single-process mount (Unix)** — `SIGSEGV` kills the FUSE thread; dirty data lost.
+   Normal exits flush via `Drop`.
+2. **Owner-only mounts** — `AllowOther` removed; other users cannot access the mountpoint.
+3. **Full-file RAM loading** — entire files decrypted into memory on `open()`.
+   A 500 MB file consumes 500 MB RSS. Streaming not implemented.
+4. **Password copy in thread** — cloned as `Vec<u8>`, no explicit `zeroize` on the copy.
+5. **Recent list stores plaintext paths** — container locations visible in
+   `~/.config/venom/recent.json`.
+6. **`.goutputstream-*` residues** — fixed with `FOPEN_DIRECT_IO`; clean existing:
    `find <mp> -name '.goutputstream-*' -delete`.
-7. **Outer safe-fill unenforced** — the GUI does not prevent filling the outer volume
-   past `outer_limit`, which would overwrite the hidden volume's data.
-8. **WinFSP not tested on real hardware** — the Windows driver compiles and maps all
-   key operations, but has not been validated by an actual Windows mount session.
+7. **Outer safe-fill unenforced** — no GUI guard against overwriting hidden volume data.
+8. **WinFSP untested on real hardware** — driver compiles and maps all ops, but no
+   live mount session has been validated.
+9. **Recipient management requires re-open** — adding/removing recipients via the GUI
+   currently requires re-opening the container (K_master not stored in mount state).

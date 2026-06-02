@@ -663,11 +663,11 @@ pub mod driver {
         #[test] fn flush_persists_and_clears_dirty() {
             let (c, mut fuse, path) = setup("flush_persist");
             let (slot, ino) = plant_file(&c, &mut fuse, "f.txt", b"v1");
-            let fh = fuse.cache_open(ino, slot, b"v2".to_vec());
+            let fh = fuse.cache_open(ino, slot, b"version-2".to_vec());
             fuse.open_files.get_mut(&fh).unwrap().dirty = true;
             fuse.flush_fh(fh).unwrap();
             assert!(!fuse.open_files[&fh].dirty);
-            assert_eq!(disk_data(&c, slot), b"v2");
+            assert_eq!(disk_data(&c, slot), b"version-2");
             std::fs::remove_file(&path).ok();
         }
 

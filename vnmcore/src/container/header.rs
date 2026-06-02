@@ -1,4 +1,4 @@
-//! On-disk container header — version 3.
+//! On-disk container header — version 1.
 //!
 //! ## Layout (512 bytes)
 //!
@@ -17,8 +17,8 @@
 //!
 //! ## Header body plaintext (396 bytes)
 //!
-//!   [0..4]    magic "VNM3"
-//!   [4..8]    version u32 LE = 3
+//!   [0..4]    magic "VNM1"
+//!   [4..8]    version u32 LE = 1
 //!   [8..16]   data_area_offset u64 LE (fixed: HEADER_REGION + RECIPIENT_AREA_SIZE)
 //!   [16..24]  outer_slots u64 LE
 //!             outer: number of outer-only data slots (claimed as full capacity)
@@ -63,8 +63,8 @@ pub const RECIPIENT_AREA_SIZE: usize = MAX_PASSWORD_SLOTS * PW_SLOT_SIZE + MAX_K
 pub const DATA_AREA_OFFSET: u64 = HEADER_REGION_SIZE + RECIPIENT_AREA_SIZE as u64;
 // = 1024 + 13960 = 14984
 
-pub const MAGIC:          &[u8; 4] = b"VNM3";
-pub const FORMAT_VERSION: u32      = 3;
+pub const MAGIC:          &[u8; 4] = b"VNM1";
+pub const FORMAT_VERSION: u32      = 1;
 
 const SALT_LEN:     usize = 64;
 const BODY_OFFSET:  usize = 68;   // after salt(64) + cipher(1) + profile(1) + n_pw(1) + n_key(1) = 68
@@ -78,8 +78,8 @@ pub(crate) const BODY_LEN: usize = 396;
 /// Size of the VNMB-encrypted header body on disk (36 VNMB header + 396 plaintext + 16 tag).
 pub(crate) const ENC_BODY_SIZE: usize = 36 + BODY_LEN; // = 432
 
-const AAD_OUTER:  &[u8] = b"vnm:header:outer:v3";
-const AAD_HIDDEN: &[u8] = b"vnm:header:hidden:v3";
+const AAD_OUTER:  &[u8] = b"vnm:header:outer:v1";
+const AAD_HIDDEN: &[u8] = b"vnm:header:hidden:v1";
 
 /// Decoded header metadata.
 #[derive(Clone)]

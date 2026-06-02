@@ -1,4 +1,4 @@
-//! VnmContainer v3 — single-file encrypted container with multi-recipient support.
+//! VnmContainer v1 — single-file encrypted container with multi-recipient support.
 //!
 //! ## Open flow
 //!
@@ -10,11 +10,11 @@
 //!
 //! ## File layout
 //!
-//!   [0..512]                   Outer header (VNM3)
+//!   [0..512]                   Outer header (VNM1)
 //!   [512..1024]                Random reserved (no header here)
 //!   [1024..1024+RECIPIENT_AREA] Recipient slots (fixed size, unused = random bytes)
 //!   [DATA_AREA_OFFSET..]       Data slots (32 KB each)
-//!   [end-512..end]             Hidden header (VNM3) or random bytes
+//!   [end-512..end]             Hidden header (VNM1) or random bytes
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -187,7 +187,7 @@ impl VnmContainer {
             // Let me use the V2 approach for the hidden header: derive K_master from password.
             drop(pw_slot); // unused
 
-            // Re-derive the hidden master key from the password (same as v2 approach for hidden)
+            // Re-derive the hidden master key from the password (standard approach for hidden)
             let mut hkdf = kdf_params_for_profile(h.kdf_profile);
             // Use a random salt stored in the hidden header's first 64 bytes
             // → already done by encode_header (it generates a random salt internally)
@@ -195,7 +195,7 @@ impl VnmContainer {
             // But encode_header encrypts with k_hidden (master key), not with password.
             // We need: encrypted_body = AEAD(K_from_password, body) OR AEAD(K_master, body)
             //
-            // The v3 design uses K_master to encrypt the header body.
+            // K_master to encrypt the header body.
             // For hidden volume: user provides password → we need K_master from a recipient slot.
             //
             // Solution: store a password recipient slot in the hidden header's tail bytes.
@@ -211,7 +211,7 @@ impl VnmContainer {
             //
             // Let's use the simplest approach:
             // Hidden header encrypted with Argon2id(password, salt) like V2.
-            // This is already what encode_header_v2 did. Let me add a helper.
+            // Use password-derived key for the hidden header.
 
             let hid_hdr = encode_header_with_password(&hid_payload, h.password, true, &k_hidden)?;
             write_bytes_at(path, file_size - 512, &hid_hdr)?;
@@ -537,7 +537,7 @@ fn update_slot_counts(
     write_bytes_at(path, 0, &new_hdr)
 }
 
-/// Derive the hidden-header encryption key directly from the password (v3 hidden volumes
+/// Derive the hidden-header encryption key directly from the password (hidden volumes
 /// use a password-derived key for the header, like V2, to avoid a separate recipient area).
 fn derive_hidden_key(raw: &[u8; 512], password: &[u8]) -> Result<[u8; 32]> {
     use crate::crypto::derive_key;
@@ -579,7 +579,7 @@ fn encode_header_with_password(
     buf[67] = payload.num_key_slots;
 
     let mut body = [0u8; crate::container::header::BODY_LEN];
-    body[0..4].copy_from_slice(b"VNM3");
+    body[0..4].copy_from_slice(b"VNM1");
     body[4..8].copy_from_slice(&3u32.to_le_bytes());
     body[8..16].copy_from_slice(&DATA_AREA_OFFSET.to_le_bytes());
     body[16..24].copy_from_slice(&payload.outer_slots.to_le_bytes());
@@ -588,7 +588,7 @@ fn encode_header_with_password(
     body[40..48].copy_from_slice(&payload.created_at.to_le_bytes());
     body[48..112].copy_from_slice(&payload.label);
 
-    let aad = if is_hidden { b"vnm:header:hidden:v3".as_ref() } else { b"vnm:header:outer:v3".as_ref() };
+    let aad = if is_hidden { b"vnm:header:hidden:v1".as_ref() } else { b"vnm:header:outer:v1".as_ref() };
     let enc = crate::crypto::encrypt_block(&key, payload.cipher, aad, &body)?;
     buf[68..68 + enc.len()].copy_from_slice(&enc);
     Ok(buf)
