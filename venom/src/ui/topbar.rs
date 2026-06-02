@@ -1,29 +1,61 @@
-use egui::{TopBottomPanel, menu};
-use crate::app::state::{VenomApp, Screen};
+use egui::{menu, RichText, TopBottomPanel};
+use crate::app::state::{MountStatus, VenomApp, Screen};
+use super::theme;
 
 pub fn render(app: &mut VenomApp, ctx: &egui::Context) {
-    TopBottomPanel::top("topbar").show(ctx, |ui| {
-        menu::bar(ui, |ui| {
-            ui.menu_button("Vault", |ui| {
-                if ui.button("New vault…").clicked() {
-                    app.screen = Screen::Create;
-                    app.clear_status();
-                    ui.close_menu();
-                }
-                if ui.button("Mount vault…").clicked() {
-                    app.screen = Screen::Mount;
-                    app.clear_status();
-                    ui.close_menu();
-                }
-            });
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    TopBottomPanel::top("topbar")
+        .frame(egui::Frame::none().fill(theme::PANEL).inner_margin(egui::Margin::symmetric(8.0, 4.0)))
+        .show(ctx, |ui| {
+            menu::bar(ui, |ui| {
+                // Brand
                 ui.label(
-                    egui::RichText::new("🔒 Venom")
+                    RichText::new("🔒 Venom")
                         .strong()
-                        .color(egui::Color32::from_rgb(100, 180, 255)),
+                        .size(15.0)
+                        .color(theme::ACCENT),
                 );
+
+                ui.separator();
+
+                ui.menu_button("Vault", |ui| {
+                    if ui.button("✚  New vault…").clicked() {
+                        app.screen = Screen::Create;
+                        app.clear_status();
+                        ui.close_menu();
+                    }
+                    if ui.button("⛰  Mount vault…").clicked() {
+                        app.screen = Screen::Mount;
+                        app.clear_status();
+                        ui.close_menu();
+                    }
+                });
+
+                // Right side: mounted vault count badge
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mounted_count = app.mounted.iter().filter(|mv| {
+                        matches!(*mv.status.lock().unwrap(), MountStatus::Mounted { .. })
+                    }).count();
+
+                    let mounting_count = app.mounted.iter().filter(|mv| {
+                        matches!(*mv.status.lock().unwrap(), MountStatus::Mounting)
+                    }).count();
+
+                    if mounting_count > 0 {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(format!("{mounting_count} connecting…"))
+                                .small()
+                                .color(theme::WARN),
+                        );
+                    }
+                    if mounted_count > 0 {
+                        ui.label(
+                            RichText::new(format!("● {mounted_count} mounted"))
+                                .small()
+                                .color(theme::SUCCESS),
+                        );
+                    }
+                });
             });
         });
-    });
 }

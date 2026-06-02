@@ -1,48 +1,79 @@
-use egui::{Color32, RichText, Ui};
+use egui::{Color32, Frame, Margin, RichText, Rounding, Ui, Vec2};
 use crate::app::state::{MountStatus, VenomApp, Screen};
+use super::theme;
 
 #[derive(Default)]
 pub struct VaultListView;
 
 pub fn render(app: &mut VenomApp, ui: &mut Ui) {
-    ui.add_space(12.0);
-    ui.heading("Mounted Vaults");
     ui.add_space(8.0);
 
-    if app.mounted.is_empty() {
-        ui.centered_and_justified(|ui| {
-            ui.label(
-                RichText::new("No vaults mounted.\nUse Vault → Mount vault… to get started.")
-                    .color(Color32::GRAY)
-                    .italics(),
-            );
+    // ── Header row ────────────────────────────────────────────────────────────
+    ui.horizontal(|ui| {
+        ui.heading("Vaults");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("⛰  Mount vault").color(Color32::WHITE))
+                        .fill(theme::BTN_PRIMARY)
+                        .min_size(Vec2::new(120.0, 28.0)),
+                )
+                .clicked()
+            {
+                app.screen = Screen::Mount;
+                app.clear_status();
+            }
+            ui.add_space(4.0);
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("✚  New vault"))
+                        .min_size(Vec2::new(100.0, 28.0)),
+                )
+                .clicked()
+            {
+                app.screen = Screen::Create;
+                app.clear_status();
+            }
         });
-        ui.add_space(16.0);
-        bottom_bar(app, ui);
+    });
+
+    ui.add_space(10.0);
+
+    // ── Empty state ───────────────────────────────────────────────────────────
+    if app.mounted.is_empty() {
+        empty_state(ui);
         return;
     }
 
+    // ── Vault cards ───────────────────────────────────────────────────────────
     let mut to_unmount: Option<usize> = None;
     let mut to_dismiss: Option<usize> = None;
-    let mut to_open: Option<String> = None;
+    let mut to_open: Option<String>   = None;
 
     egui::ScrollArea::vertical()
-        .max_height(ui.available_height() - 48.0)
+        .max_height(ui.available_height() - 8.0)
         .show(ui, |ui| {
             for (i, mv) in app.mounted.iter().enumerate() {
                 let status = mv.status.lock().unwrap().clone();
-                vault_card(ui, i, mv.vault_path.as_str(), mv.mountpoint.as_str(), &status,
-                    &mut to_unmount, &mut to_dismiss, &mut to_open);
-                ui.add_space(6.0);
+                vault_card(
+                    ui, i,
+                    mv.vault_path.as_str(),
+                    mv.mountpoint.as_str(),
+                    &status,
+                    &mut to_unmount,
+                    &mut to_dismiss,
+                    &mut to_open,
+                );
+                ui.add_space(8.0);
             }
         });
 
     if let Some(i) = to_unmount { app.action_unmount(i); }
     if let Some(i) = to_dismiss { app.action_dismiss_error(i); }
     if let Some(p) = to_open    { app.action_open_folder(&p); }
-
-    bottom_bar(app, ui);
 }
+
+// ── Vault card ────────────────────────────────────────────────────────────────
 
 fn vault_card(
     ui: &mut Ui,
@@ -54,104 +85,140 @@ fn vault_card(
     to_dismiss: &mut Option<usize>,
     to_open: &mut Option<String>,
 ) {
-    egui::Frame::group(ui.style())
-        .inner_margin(egui::Margin::same(10.0))
+    let (border_color, bg) = match status {
+        MountStatus::Mounting => (theme::WARN,    Color32::from_rgb(34, 32, 20)),
+        MountStatus::Mounted { .. } => (theme::SUCCESS, Color32::from_rgb(20, 34, 24)),
+        MountStatus::Error(_) => (theme::ERROR,   Color32::from_rgb(38, 20, 20)),
+    };
+
+    Frame::none()
+        .fill(bg)
+        .stroke(egui::Stroke::new(1.5, border_color))
+        .rounding(Rounding::same(10.0))
+        .inner_margin(Margin::same(14.0))
         .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                // ── Left column: metadata ─────────────────────────────
+                // ── Left: status icon + info ──────────────────────────────────
                 ui.vertical(|ui| {
                     match status {
                         MountStatus::Mounting => {
                             ui.horizontal(|ui| {
                                 ui.spinner();
+                                ui.add_space(4.0);
                                 ui.label(
-                                    RichText::new("Mounting…")
+                                    RichText::new("Connecting…")
                                         .strong()
-                                        .color(Color32::from_rgb(180, 180, 60)),
+                                        .size(15.0)
+                                        .color(theme::WARN),
                                 );
                             });
-                            ui.label(
-                                RichText::new(vault_path).color(Color32::GRAY).small(),
-                            );
+                            mono_row(ui, "vault", vault_path);
+                            mono_row(ui, "mount", mountpoint);
                         }
 
                         MountStatus::Mounted { label, cipher, created_at } => {
-                            let title = label.as_deref().unwrap_or("(unlabelled)");
+                            let title = label.as_deref().unwrap_or("Unnamed vault");
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new("● ")
-                                        .color(Color32::from_rgb(80, 200, 120))
+                                    RichText::new("●")
+                                        .color(theme::SUCCESS)
                                         .strong(),
                                 );
-                                ui.label(RichText::new(title).strong().size(15.0));
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(title).strong().size(15.0),
+                                );
+                                ui.label(
+                                    RichText::new(format!("  read-write"))
+                                        .small()
+                                        .color(theme::SUCCESS),
+                                );
                             });
-                            ui.label(
-                                RichText::new(format!("📁  {vault_path}"))
-                                    .color(Color32::GRAY).small(),
-                            );
-                            ui.label(
-                                RichText::new(format!("⛰  {mountpoint}"))
-                                    .color(Color32::GRAY).small(),
-                            );
-                            ui.label(
-                                RichText::new(format!(
-                                    "🔑  {cipher}   •   {}",
-                                    format_timestamp(*created_at)
-                                ))
-                                .color(Color32::GRAY).small(),
-                            );
+                            ui.add_space(2.0);
+                            mono_row(ui, "vault", vault_path);
+                            mono_row(ui, "mount", mountpoint);
+                            ui.horizontal(|ui| {
+                                pill(ui, cipher, theme::ACCENT);
+                                ui.label(
+                                    RichText::new(format_ts(*created_at))
+                                        .small()
+                                        .color(theme::TEXT_MUTED),
+                                );
+                            });
                         }
 
                         MountStatus::Error(msg) => {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    RichText::new("✗ ")
-                                        .color(Color32::from_rgb(220, 80, 80))
+                                    RichText::new("✗")
+                                        .color(theme::ERROR)
                                         .strong(),
                                 );
-                                ui.label(RichText::new("Mount failed").strong());
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new("Mount failed")
+                                        .strong()
+                                        .size(15.0)
+                                        .color(theme::ERROR),
+                                );
                             });
-                            ui.label(
-                                RichText::new(vault_path).color(Color32::GRAY).small(),
-                            );
+                            mono_row(ui, "vault", vault_path);
                             ui.label(
                                 RichText::new(msg.as_str())
-                                    .color(Color32::from_rgb(220, 100, 100))
-                                    .small(),
+                                    .small()
+                                    .color(theme::ERROR),
                             );
                         }
                     }
                 });
 
-                // ── Right column: action buttons ──────────────────────
+                // ── Right: action buttons ─────────────────────────────────────
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(4.0);
                     match status {
                         MountStatus::Mounting => {
-                            let btn = egui::Button::new(
-                                RichText::new("Cancel").color(Color32::from_rgb(220, 80, 80)),
-                            );
-                            if ui.add(btn).clicked() {
-                                *to_unmount = Some(index);
-                            }
-                        }
-
-                        MountStatus::Mounted { .. } => {
                             if ui
-                                .button(
-                                    RichText::new("Unmount")
-                                        .color(Color32::from_rgb(220, 80, 80)),
+                                .add(
+                                    egui::Button::new(RichText::new("Cancel").color(Color32::WHITE))
+                                        .fill(theme::BTN_DANGER)
+                                        .min_size(Vec2::new(80.0, 28.0)),
                                 )
                                 .clicked()
                             {
                                 *to_unmount = Some(index);
                             }
-                            if ui.button("Open folder").clicked() {
+                        }
+                        MountStatus::Mounted { .. } => {
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("Unmount").color(Color32::WHITE))
+                                        .fill(theme::BTN_DANGER)
+                                        .min_size(Vec2::new(90.0, 28.0)),
+                                )
+                                .clicked()
+                            {
+                                *to_unmount = Some(index);
+                            }
+                            ui.add_space(6.0);
+                            if ui
+                                .add(
+                                    egui::Button::new("Open folder")
+                                        .min_size(Vec2::new(100.0, 28.0)),
+                                )
+                                .clicked()
+                            {
                                 *to_open = Some(mountpoint.to_string());
                             }
                         }
-
                         MountStatus::Error(_) => {
-                            if ui.button("Dismiss").clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new("Dismiss")
+                                        .min_size(Vec2::new(80.0, 28.0)),
+                                )
+                                .clicked()
+                            {
                                 *to_dismiss = Some(index);
                             }
                         }
@@ -161,45 +228,67 @@ fn vault_card(
         });
 }
 
-fn bottom_bar(app: &mut VenomApp, ui: &mut Ui) {
-    ui.add_space(8.0);
+// ── Empty state ───────────────────────────────────────────────────────────────
+
+fn empty_state(ui: &mut Ui) {
+    let avail = ui.available_size();
+    ui.allocate_ui_with_layout(
+        avail,
+        egui::Layout::centered_and_justified(egui::Direction::TopDown),
+        |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(avail.y * 0.20);
+                ui.label(RichText::new("🔒").size(52.0));
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new("No vaults mounted")
+                        .size(18.0)
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Create a new vault or mount an existing one to get started.")
+                        .color(theme::TEXT_MUTED)
+                        .small(),
+                );
+            });
+        },
+    );
+}
+
+// ── Small helpers ─────────────────────────────────────────────────────────────
+
+fn mono_row(ui: &mut Ui, key: &str, value: &str) {
     ui.horizontal(|ui| {
-        if ui.button("+ New vault").clicked() {
-            app.screen = Screen::Create;
-            app.clear_status();
-        }
-        if ui.button("⛰ Mount vault").clicked() {
-            app.screen = Screen::Mount;
-            app.clear_status();
-        }
+        ui.label(RichText::new(format!("{key}:")).small().color(theme::TEXT_MUTED));
+        ui.label(RichText::new(value).small().monospace().color(theme::TEXT_MUTED));
     });
 }
 
-/// Format a Unix timestamp as "YYYY-MM-DD HH:MM".
-fn format_timestamp(secs: u64) -> String {
-    // Simple manual formatter — no external crate needed.
-    let s = secs;
-    let mins_total = s / 60;
-    let hour = (mins_total / 60) % 24;
-    let min = mins_total % 60;
-
-    // Days since Unix epoch → Gregorian calendar
-    let days = s / 86400;
-    let (y, mo, d) = days_to_ymd(days);
-    format!("{y:04}-{mo:02}-{d:02} {hour:02}:{min:02}")
+fn pill(ui: &mut Ui, text: &str, color: Color32) {
+    Frame::none()
+        .fill(color.gamma_multiply(0.18))
+        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.5)))
+        .rounding(Rounding::same(4.0))
+        .inner_margin(Margin::symmetric(6.0, 2.0))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).small().color(color));
+        });
 }
 
-fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
-    // Rata Die algorithm (simplified, valid for years 1970–2200).
-    days += 719_468;
-    let era = days / 146_097;
-    let doe = days % 146_097;
+fn format_ts(secs: u64) -> String {
+    let m = secs / 60;
+    let h = (m / 60) % 24;
+    let mn = m % 60;
+    let d = secs / 86400 + 719_468;
+    let era = d / 146_097;
+    let doe = d % 146_097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
+    let dd = doy - (153 * mp + 2) / 5 + 1;
     let mo = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if mo <= 2 { y + 1 } else { y };
-    (y as u32, mo as u32, d as u32)
+    format!("created {y:04}-{mo:02}-{dd:02} {h:02}:{mn:02}")
 }
