@@ -615,7 +615,7 @@ pub mod driver {
         let options = vec![
             MountOption::FSName("venom".into()),
             MountOption::AutoUnmount,
-            MountOption::AllowOther,
+            // AllowOther requires user_allow_other in /etc/fuse.conf or root — omitted.
         ];
         fuser::mount2(fs, mountpoint, &options).map_err(VnmError::Io)
     }
