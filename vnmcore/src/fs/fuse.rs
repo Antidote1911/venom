@@ -27,10 +27,24 @@ pub mod driver {
 
     use fuser::{
         FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate,
-        ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite,
-        Request, TimeOrNow,
+        ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
+        ReplyWrite, Request, TimeOrNow,
     };
     use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTEMPTY, ENOTDIR};
+
+    /// Bypass the kernel page cache for every file we open or create.
+    ///
+    /// Without this flag the kernel buffers writes in its page cache and later
+    /// flushes them using `fh = 0` (no file handle). Our `write`/`read` code
+    /// falls back to a direct disk path when `fh` is not in `open_files`, and
+    /// that path can fail with EIO under certain timing conditions — exactly
+    /// the "erreur d'entrée/sortie" reported by file managers after creating a
+    /// new file.
+    ///
+    /// Setting `FOPEN_DIRECT_IO` forces every read/write through FUSE with the
+    /// correct `fh`, eliminating the fh=0 writeback path entirely.
+    /// (Same approach used by gocryptfs, encfs, and other encrypted FUSE fs.)
+    const FOPEN_DIRECT_IO: u32 = 1;
 
     use crate::fs::vault::Vault;
     use crate::storage::vault_fs::{DirectoryBlock, DirEntry, FileBlock};
@@ -542,12 +556,12 @@ pub mod driver {
             }
         }
 
-        fn create(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, flags: i32, reply: ReplyCreate) {
+        fn create(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, _flags: i32, reply: ReplyCreate) {
             let name = match name.to_str() { Some(n) => n, None => { reply.error(EINVAL); return; } };
             match self.op_create(parent, name) {
                 Ok((ino, fh)) => {
                     let attr = self.make_file_attr(ino, 0);
-                    reply.created(&TTL, &attr, 0, fh, flags as u32);
+                    reply.created(&TTL, &attr, 0, fh, FOPEN_DIRECT_IO);
                 }
                 Err(e) => reply.error(e),
             }
@@ -570,16 +584,34 @@ pub mod driver {
             }
         }
 
-        fn open(&mut self, _req: &Request, ino: u64, flags: i32, reply: ReplyOpen) {
+        fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
             match self.op_open(ino) {
-                Ok(fh) => reply.opened(fh, flags as u32),
+                Ok(fh) => reply.opened(fh, FOPEN_DIRECT_IO),
                 Err(e) => reply.error(e),
             }
         }
 
         fn release(&mut self, _req: &Request, _ino: u64, fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
+            // Always reply ok: POSIX says close() must not block on I/O errors.
+            // Flush errors are reported via flush() before release() is called.
             let _ = self.op_release(fh);
             reply.ok();
+        }
+
+        fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
+            // Report a large virtual disk so file managers don't refuse to
+            // create files due to apparent lack of space.
+            // The real limit is the underlying filesystem hosting the vault.
+            reply.statfs(
+                1 << 30, // blocks total  (~512 GB at 512 B/block)
+                1 << 30, // blocks free
+                1 << 30, // blocks available (non-root)
+                1 << 20, // inodes total
+                1 << 20, // inodes free
+                512,     // block size
+                255,     // max filename length
+                512,     // fragment size
+            );
         }
 
         fn flush(&mut self, _req: &Request, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
