@@ -1,30 +1,32 @@
-/// Diagnostic tool: create a vault, mount it, write a file, unmount.
-/// Usage:  cargo run -p vnmcore --example mount_test -- <vault_dir> <mountpoint>
+/// Diagnostic: create or open a container and mount it.
+/// Usage: cargo run -p vnmcore --example mount_test -- <container.vnm> <mountpoint>
 use std::sync::Arc;
-use vnmcore::{container::CipherAlgorithm, fs::{Vault, fuse::driver}};
+use vnmcore::{container::CipherAlgorithm, fs::{VnmContainer, fuse::driver}};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 3 {
-        eprintln!("Usage: mount_test <vault_dir> <mountpoint>");
+        eprintln!("Usage: mount_test <container.vnm> <mountpoint>");
         std::process::exit(1);
     }
-    let vault_dir  = &args[1];
-    let mountpoint = &args[2];
+    let container_path = &args[1];
+    let mountpoint     = &args[2];
+    const MB: u64 = 1024 * 1024;
 
-    // Create or open vault
-    let vault = if std::path::Path::new(vault_dir).join("vnm_bootstrap.json").exists() {
-        println!("[1/3] Opening existing vault at {vault_dir}…");
-        Vault::open(vault_dir, b"test-password").expect("open failed")
+    let c = if std::path::Path::new(container_path).exists() {
+        println!("[1/3] Opening existing container {container_path}…");
+        VnmContainer::open(container_path, b"test-password").expect("open failed")
     } else {
-        println!("[1/3] Creating new vault at {vault_dir}…");
-        std::fs::create_dir_all(vault_dir).ok();
-        Vault::create(vault_dir, b"test-password", CipherAlgorithm::ChaCha20Poly1305, "interactive", Some("test".into()))
-            .expect("create failed")
+        println!("[1/3] Creating new container {container_path} (16 MB)…");
+        VnmContainer::create(
+            container_path, b"test-password", 16 * MB,
+            CipherAlgorithm::ChaCha20Poly1305, "interactive",
+            Some("test".into()), None,
+        ).expect("create failed")
     };
 
-    println!("[2/3] Mounting at {mountpoint}  (Ctrl-C or fusermount3 -u to stop)…");
-    match driver::mount(Arc::new(vault), mountpoint) {
+    println!("[2/3] Mounting at {mountpoint}  (fusermount3 -u <mp> to stop)…");
+    match driver::mount(Arc::new(c), mountpoint) {
         Ok(_)  => println!("[3/3] Unmounted cleanly."),
         Err(e) => eprintln!("[3/3] Mount error: {e}"),
     }

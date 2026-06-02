@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 use vnmcore::container::CipherAlgorithm;
-use vnmcore::fs::Vault;
+use vnmcore::fs::container::{VnmContainer, HiddenVolumeOptions};
 use crate::app::state::{MountStatus, MountedVault, Screen, VenomApp};
 use crate::recent::read_cipher_from_bootstrap;
 
@@ -10,8 +10,12 @@ impl VenomApp {
     pub fn action_create_vault(&mut self) {
         let v = &self.create_view;
 
-        if v.vault_path.is_empty() {
-            self.set_status("Vault path is required.", true);
+        if v.container_path.is_empty() {
+            self.set_status("Container file path is required.", true);
+            return;
+        }
+        if v.size_mb == 0 {
+            self.set_status("Container size must be > 0 MB.", true);
             return;
         }
         if v.password.is_empty() {
@@ -22,25 +26,65 @@ impl VenomApp {
             self.set_status("Passwords do not match.", true);
             return;
         }
+        if v.hidden_enabled {
+            if v.hidden_password.is_empty() {
+                self.set_status("Hidden volume password is required.", true);
+                return;
+            }
+            if v.hidden_password != v.hidden_password_confirm {
+                self.set_status("Hidden volume passwords do not match.", true);
+                return;
+            }
+            if v.hidden_size_mb == 0 {
+                self.set_status("Hidden volume size must be > 0 MB.", true);
+                return;
+            }
+            let min_outer = v.hidden_size_mb + 2;
+            if v.size_mb <= min_outer {
+                self.set_status(
+                    format!("Total size must be > {} MB to fit the hidden volume.", min_outer),
+                    true,
+                );
+                return;
+            }
+        }
 
         let cipher = match v.cipher_index {
             0 => CipherAlgorithm::ChaCha20Poly1305,
             _ => CipherAlgorithm::Aes256Gcm,
         };
         let profile = if v.high_security { "sensitive" } else { "interactive" };
-        let label = if v.label.is_empty() { None } else { Some(v.label.clone()) };
+        let label   = if v.label.is_empty() { None } else { Some(v.label.clone()) };
+        let total_bytes = v.size_mb as u64 * 1024 * 1024;
 
-        let vault_path = v.vault_path.clone();
-        let label_for_recent = label.clone();
-        let cipher_str = match cipher {
-            CipherAlgorithm::ChaCha20Poly1305 => "chacha20-poly1305",
-            CipherAlgorithm::Aes256Gcm        => "aes-256-gcm",
+        // Build hidden options if requested
+        let hidden_bytes    = v.hidden_size_mb as u64 * 1024 * 1024;
+        let hidden_password = v.hidden_password.as_bytes().to_vec();
+        let hidden_label    = if v.hidden_label.is_empty() { None } else { Some(v.hidden_label.clone()) };
+        let hidden_enabled  = v.hidden_enabled;
+        let hidden_profile  = if v.high_security { "sensitive" } else { "interactive" };
+
+        let container_path = v.container_path.clone();
+        let password = v.password.as_bytes().to_vec();
+        let cipher_str = cipher.as_str().to_string();
+
+        // Create is synchronous for now (runs KDF + fills container with random bytes)
+        // TODO: make async with progress indicator for large containers
+        let hidden_opt = if hidden_enabled {
+            Some(HiddenVolumeOptions {
+                password: &hidden_password,
+                size_bytes: hidden_bytes,
+                label: hidden_label,
+                kdf_profile: hidden_profile,
+            })
+        } else {
+            None
         };
 
-        match Vault::create(&vault_path, v.password.as_bytes(), cipher, profile, label) {
+        match VnmContainer::create(&container_path, &password, total_bytes, cipher, profile, label, hidden_opt) {
             Ok(_) => {
-                self.recent.add(&vault_path, label_for_recent, Some(cipher_str.into()));
-                self.set_status(format!("Vault created at {vault_path}"), false);
+                self.recent.add(&container_path, None, Some(cipher_str));
+                self.set_status(format!("Container created: {container_path}"), false);
                 self.create_view = Default::default();
                 self.screen = Screen::VaultList;
             }
@@ -54,63 +98,49 @@ impl VenomApp {
         let v = &self.mount_view;
 
         if v.vault_path.is_empty() || v.mountpoint.is_empty() {
-            self.set_status("Vault path and mountpoint are required.", true);
+            self.set_status("Container path and mountpoint are required.", true);
             return;
         }
         if v.password.is_empty() {
             self.set_status("Password is required.", true);
             return;
         }
-
-        // Reject duplicate mountpoints.
         if self.mounted.iter().any(|mv| mv.mountpoint == v.mountpoint) {
-            self.set_status(
-                format!("'{}' is already in use as a mountpoint.", v.mountpoint),
-                true,
-            );
+            self.set_status(format!("'{}' is already in use as a mountpoint.", v.mountpoint), true);
             return;
         }
 
-        let status = Arc::new(Mutex::new(MountStatus::Mounting));
-        let status_thread = Arc::clone(&status);
+        let status     = Arc::new(Mutex::new(MountStatus::Mounting));
+        let st_thread  = Arc::clone(&status);
         let vault_path = v.vault_path.clone();
         let mountpoint = v.mountpoint.clone();
-        let password = v.password.as_bytes().to_vec();
-        let ctx = self.egui_ctx.clone();
+        let password   = v.password.as_bytes().to_vec();
+        let ctx        = self.egui_ctx.clone();
 
-        // Spawn a dedicated thread so KDF + FUSE never block the UI thread.
         #[cfg(target_family = "unix")]
         std::thread::Builder::new()
             .name(format!("vnm-mount:{mountpoint}"))
             .spawn(move || {
                 use vnmcore::fs::fuse::driver;
-
-                match Vault::open(&vault_path, &password) {
-                    Ok(vault) => {
-                        // Vault opened — update status before blocking on FUSE mount.
-                        *status_thread.lock().unwrap() = MountStatus::Mounted {
-                            label: vault.config.label.clone(),
-                            cipher: vault.config.cipher.to_string(),
-                            created_at: vault.config.created_at,
+                match VnmContainer::open(&vault_path, &password) {
+                    Ok(c) => {
+                        *st_thread.lock().unwrap() = MountStatus::Mounted {
+                            label:      c.label.clone(),
+                            cipher:     c.cipher.to_string(),
+                            created_at: c.created_at,
+                            is_hidden:  c.is_hidden,
                         };
                         ctx.request_repaint();
-
-                        // Blocks until fusermount3 -u (or equivalent) tears down the mount.
-                        match driver::mount(Arc::new(vault), &mountpoint) {
-                            Ok(_) => {
-                                // Clean unmount — transition to Gone so the GUI can remove the card.
-                                *status_thread.lock().unwrap() = MountStatus::Gone;
-                                ctx.request_repaint();
-                            }
-                            Err(e) => {
-                                *status_thread.lock().unwrap() =
-                                    MountStatus::Error(format!("FUSE error: {e}"));
-                                ctx.request_repaint();
-                            }
+                        if let Err(e) = driver::mount(Arc::new(c), &mountpoint) {
+                            *st_thread.lock().unwrap() = MountStatus::Error(format!("FUSE: {e}"));
+                            ctx.request_repaint();
+                        } else {
+                            *st_thread.lock().unwrap() = MountStatus::Gone;
+                            ctx.request_repaint();
                         }
                     }
                     Err(e) => {
-                        *status_thread.lock().unwrap() = MountStatus::Error(e.to_string());
+                        *st_thread.lock().unwrap() = MountStatus::Error(e.to_string());
                         ctx.request_repaint();
                     }
                 }
@@ -119,12 +149,9 @@ impl VenomApp {
 
         #[cfg(not(target_family = "unix"))]
         {
-            *status.lock().unwrap() =
-                MountStatus::Error("FUSE is only supported on Linux / macOS.".into());
+            *status.lock().unwrap() = MountStatus::Error("FUSE is only supported on Linux / macOS.".into());
         }
 
-        // Add to recent immediately with cipher from bootstrap (no KDF needed).
-        // Label will be enriched later by update() once the thread reports Mounted.
         let cipher_hint = read_cipher_from_bootstrap(&v.vault_path);
         self.recent.add(&v.vault_path, None, cipher_hint);
 
@@ -133,7 +160,6 @@ impl VenomApp {
             mountpoint: v.mountpoint.clone(),
             status,
         });
-
         self.mount_view = Default::default();
         self.screen = Screen::VaultList;
     }
@@ -141,54 +167,42 @@ impl VenomApp {
     // ── Unmount ───────────────────────────────────────────────────────────────
 
     pub fn action_unmount(&mut self, index: usize) {
-        if let Some(mv) = self.mounted.get(index) {
-            let mp = mv.mountpoint.clone();
-            match unmount_platform(&mp) {
-                Ok(_) => {
-                    // Card will be auto-removed when the mount thread sets status → Gone.
-                    // If the thread is already dead (e.g. error state), remove immediately.
-                    let already_gone = !matches!(
-                        *mv.status.lock().unwrap(),
-                        MountStatus::Mounted { .. } | MountStatus::Mounting
-                    );
-                    if already_gone {
-                        self.mounted.remove(index);
-                    }
-                    self.set_status(format!("Unmounting {mp}…"), false);
-                }
-                Err(e) => {
-                    self.set_status(format!("Unmount failed: {e}"), true);
-                }
+        if index >= self.mounted.len() { return; }
+        let mp = self.mounted[index].mountpoint.clone();
+        let already_gone = !matches!(
+            *self.mounted[index].status.lock().unwrap(),
+            MountStatus::Mounted { .. } | MountStatus::Mounting
+        );
+        match unmount_platform(&mp) {
+            Ok(_)  => { self.set_status(format!("Unmounting {mp}…"), false); }
+            Err(e) => { self.set_status(format!("Unmount failed: {e}"), true); return; }
+        }
+        if already_gone { self.mounted.remove(index); }
+    }
+
+    pub fn action_dismiss_error(&mut self, index: usize) {
+        if index < self.mounted.len() { self.mounted.remove(index); }
+    }
+
+    pub fn gc_gone_mounts(&mut self) {
+        // Enrich recent with label/cipher/is_hidden from newly-Mounted vaults
+        for mv in &self.mounted {
+            if self.recent_enriched.contains(&mv.vault_path) { continue; }
+            if let MountStatus::Mounted { label, cipher, .. } = &*mv.status.lock().unwrap() {
+                self.recent.update_metadata(&mv.vault_path, label.clone(), Some(cipher.clone()));
+                self.recent_enriched.insert(mv.vault_path.clone());
             }
         }
-    }
-
-    /// Called every frame by update() — removes cards whose mount thread has exited.
-    pub fn gc_gone_mounts(&mut self) {
-        self.mounted.retain(|mv| {
-            !matches!(*mv.status.lock().unwrap(), MountStatus::Gone)
-        });
-    }
-
-    /// Remove a vault card that is in an Error state.
-    pub fn action_dismiss_error(&mut self, index: usize) {
-        if index < self.mounted.len() {
-            self.mounted.remove(index);
-        }
+        self.mounted.retain(|mv| !matches!(*mv.status.lock().unwrap(), MountStatus::Gone));
     }
 
     // ── Open folder ───────────────────────────────────────────────────────────
 
     pub fn action_open_folder(&mut self, path: &str) {
-        // Verify the path is reachable before trying to open it.
         if !std::path::Path::new(path).exists() {
-            self.set_status(
-                format!("Cannot open '{path}': directory not found or vault not mounted."),
-                true,
-            );
+            self.set_status(format!("Cannot open '{path}': not mounted or not found."), true);
             return;
         }
-
         match open_in_file_manager(path) {
             Ok(bin) => self.set_status(format!("Opened {path} with {bin}"), false),
             Err(e)  => self.set_status(format!("Could not open folder: {e}"), true),
@@ -198,101 +212,43 @@ impl VenomApp {
 
 // ── Platform helpers ──────────────────────────────────────────────────────────
 
-/// Send the unmount signal via the appropriate helper.
-/// Returns Ok(()) only when the helper exited with status 0.
 fn unmount_platform(mountpoint: &str) -> Result<(), String> {
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     {
-        // Prefer fusermount3 (libfuse3); fall back to fusermount (libfuse2).
         for bin in &["fusermount3", "fusermount"] {
             match std::process::Command::new(bin).args(["-u", mountpoint]).status() {
                 Ok(s) if s.success() => return Ok(()),
-                Ok(s) => {
-                    // Exited with non-zero — try the fallback before giving up.
-                    let _ = s;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    continue; // binary not installed, try next
-                }
+                Ok(_)  => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(format!("{bin}: {e}")),
             }
         }
-        Err(format!(
-            "fusermount3/fusermount failed for '{mountpoint}'. \
-             Is the vault still mounted?"
-        ))
+        Err(format!("fusermount3/fusermount failed for '{mountpoint}'"))
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("umount")
-            .arg(mountpoint)
-            .status()
+        std::process::Command::new("umount").arg(mountpoint).status()
             .map_err(|e| e.to_string())
-            .and_then(|s| {
-                if s.success() { Ok(()) }
-                else { Err(format!("umount exited with {s}")) }
-            })
+            .and_then(|s| if s.success() { Ok(()) } else { Err(format!("umount: {s}")) })
     }
     #[cfg(target_os = "windows")]
-    {
-        let _ = mountpoint;
-        Err("Unmount not yet implemented on Windows.".into())
-    }
+    { let _ = mountpoint; Err("Not implemented on Windows.".into()) }
 }
 
-/// Try to open `path` in a file manager.
-/// Returns the name of the binary used on success, or an error string.
 fn open_in_file_manager(path: &str) -> Result<String, String> {
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     {
-        // Ordered candidate list: generic portal first, then common DEs.
-        // xdg-open delegates to the right app depending on XDG_CURRENT_DESKTOP.
-        // If it's missing or broken we fall back to well-known file managers.
-        let candidates = [
-            "xdg-open",   // generic (GNOME, KDE, XFCE, …)
-            "nautilus",   // GNOME
-            "dolphin",    // KDE
-            "thunar",     // XFCE
-            "nemo",       // Cinnamon
-            "pcmanfm",    // LXDE / LXQt
-            "caja",       // MATE
-        ];
-
-        let mut last_err = String::from("no file manager found in PATH");
-
-        for bin in &candidates {
+        for bin in &["xdg-open","nautilus","dolphin","thunar","nemo","pcmanfm","caja"] {
             match std::process::Command::new(bin).arg(path).spawn() {
                 Ok(_)  => return Ok(bin.to_string()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Not installed — try the next candidate.
-                    continue;
-                }
-                Err(e) => {
-                    // Present but failed to launch (permissions, etc.).
-                    last_err = format!("{bin}: {e}");
-                    continue;
-                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("{bin}: {e}")),
             }
         }
-
-        Err(last_err)
+        Err("no file manager found".into())
     }
-
     #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(path)
-            .spawn()
-            .map(|_| "open".to_string())
-            .map_err(|e| format!("open: {e}"))
-    }
-
+    { std::process::Command::new("open").arg(path).spawn().map(|_| "open".into()).map_err(|e| e.to_string()) }
     #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg(path)
-            .spawn()
-            .map(|_| "explorer".to_string())
-            .map_err(|e| format!("explorer: {e}"))
-    }
+    { std::process::Command::new("explorer").arg(path).spawn().map(|_| "explorer".into()).map_err(|e| e.to_string()) }
 }

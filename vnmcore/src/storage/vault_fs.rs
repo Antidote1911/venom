@@ -1,45 +1,43 @@
 use serde::{Deserialize, Serialize};
 
-/// Discriminant stored inside every encrypted block to know its role.
+/// Logical type of a filesystem node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     Directory,
     File,
-    /// A continuation block for files larger than one block
     FileContinuation,
 }
 
-/// A single directory entry (name → block UUID mapping).
+/// A single directory entry: name → slot mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirEntry {
     pub name: String,
-    pub block_id: String,
+    pub slot: u64,
     pub kind: NodeKind,
 }
 
-/// Content of a directory block.
+/// Content stored inside a directory slot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryBlock {
-    pub kind: NodeKind, // always NodeKind::Directory
+    pub kind:    NodeKind,
     pub entries: Vec<DirEntry>,
 }
 
-/// Content of a file block (first block of a file).
+/// Content stored inside a file slot (first block of a file).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileBlock {
-    pub kind: NodeKind, // NodeKind::File
-    /// Total file size in bytes (used to trim padding on last block)
+    pub kind: NodeKind,
+    /// Total file size in bytes (used to trim padding on the last block).
     pub total_size: u64,
-    /// Ordered list of continuation block UUIDs (empty if file fits in one block)
-    pub continuation_ids: Vec<String>,
-    /// Inline payload — contains the first `block_size - overhead` bytes of the file
+    /// Ordered list of continuation slot indices (empty if file fits in one slot).
+    pub continuation_slots: Vec<u64>,
+    /// Inline payload — first `SLOT_PAYLOAD_CAPACITY` bytes of the file.
     #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 
-/// Decoded representation of any block's plaintext payload.
-/// Uses bincode's default discriminant encoding (u32) — no untagged.
+/// Decoded representation of any slot's plaintext payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VaultNode {
     Directory(DirectoryBlock),

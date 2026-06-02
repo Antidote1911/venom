@@ -1,21 +1,14 @@
-//! FUSE filesystem adapter — mounts a Vault as a read-write directory.
+//! FUSE filesystem adapter for single-file Venom containers.
 //!
-//! ## Architecture
+//! Architecture: each FUSE op has a pure `op_*()` method (returns Result<T, errno>)
+//! and a thin Filesystem wrapper. Tests call op_*() directly without mounting.
 //!
-//! Each FUSE operation is split into two layers:
-//!
-//!   op_*()            — pure business logic, returns Result<T, libc errno>
-//!   Filesystem impl   — thin wrapper: calls op_*(), converts to fuser reply
-//!
-//! This lets integration tests call op_*() directly without a FUSE mount.
-//!
-//! ## File I/O model
-//!
-//!   open    → decrypt all blocks → Vec<u8> in OpenFile.data
-//!   read    → slice from cache   (zero disk I/O)
-//!   write   → patch cache, dirty = true   (zero disk I/O)
-//!   flush   → re-encrypt & persist if dirty
-//!   release → flush + evict from cache
+//! File I/O model (in-memory cache per open file handle):
+//!   open    → decrypt all slots → Vec<u8> in OpenFile.data   (zero disk I/O after)
+//!   read    → slice from cache
+//!   write   → patch cache, dirty = true                       (zero disk I/O)
+//!   flush   → re-encrypt & persist slots if dirty
+//!   release → flush + evict
 //!   Drop    → flush_all() safety net
 
 #[cfg(feature = "fuse")]
@@ -32,137 +25,116 @@ pub mod driver {
     };
     use libc::{EEXIST, EINVAL, EIO, EISDIR, ENOENT, ENOTEMPTY, ENOTDIR};
 
-    /// Bypass the kernel page cache for every file we open or create.
-    ///
-    /// Without this flag the kernel buffers writes in its page cache and later
-    /// flushes them using `fh = 0` (no file handle). Our `write`/`read` code
-    /// falls back to a direct disk path when `fh` is not in `open_files`, and
-    /// that path can fail with EIO under certain timing conditions — exactly
-    /// the "erreur d'entrée/sortie" reported by file managers after creating a
-    /// new file.
-    ///
-    /// Setting `FOPEN_DIRECT_IO` forces every read/write through FUSE with the
-    /// correct `fh`, eliminating the fh=0 writeback path entirely.
-    /// (Same approach used by gocryptfs, encfs, and other encrypted FUSE fs.)
-    const FOPEN_DIRECT_IO: u32 = 1;
-
-    use crate::fs::vault::Vault;
+    use crate::fs::container::VnmContainer;
     use crate::storage::vault_fs::{DirectoryBlock, DirEntry, FileBlock};
     use crate::storage::{NodeKind, VaultNode};
     use crate::VnmError;
 
     const TTL: Duration = Duration::from_secs(1);
     pub const ROOT_INO: u64 = 1;
-    const BLOCK_DATA_CAPACITY: usize = 30_000;
 
-    // ── Inode ↔ block-id mapping ─────────────────────────────────────────────
+    /// Max bytes of file data stored inline per slot (conservative).
+    const FILE_DATA_CHUNK: usize = 30_000;
+
+    /// Bypass kernel page cache — prevents fh=0 writeback EIO.
+    const FOPEN_DIRECT_IO: u32 = 1;
+
+    // ── Inode ↔ slot mapping ──────────────────────────────────────────────────
 
     struct InodeMap {
-        id_to_ino: HashMap<String, u64>,
-        ino_to_id: HashMap<u64, String>,
+        slot_to_ino: HashMap<u64, u64>,
+        ino_to_slot: HashMap<u64, u64>,
         next_ino: u64,
     }
 
     impl InodeMap {
-        fn new(root_id: &str) -> Self {
+        fn new(root_slot: u64) -> Self {
             let mut m = Self {
-                id_to_ino: HashMap::new(),
-                ino_to_id: HashMap::new(),
+                slot_to_ino: HashMap::new(),
+                ino_to_slot: HashMap::new(),
                 next_ino: 2,
             };
-            m.id_to_ino.insert(root_id.to_string(), ROOT_INO);
-            m.ino_to_id.insert(ROOT_INO, root_id.to_string());
+            m.slot_to_ino.insert(root_slot, ROOT_INO);
+            m.ino_to_slot.insert(ROOT_INO, root_slot);
             m
         }
 
-        fn get_or_alloc(&mut self, id: &str) -> u64 {
-            if let Some(&ino) = self.id_to_ino.get(id) {
-                return ino;
-            }
+        fn get_or_alloc(&mut self, slot: u64) -> u64 {
+            if let Some(&ino) = self.slot_to_ino.get(&slot) { return ino; }
             let ino = self.next_ino;
             self.next_ino += 1;
-            self.id_to_ino.insert(id.to_string(), ino);
-            self.ino_to_id.insert(ino, id.to_string());
+            self.slot_to_ino.insert(slot, ino);
+            self.ino_to_slot.insert(ino, slot);
             ino
         }
 
-        fn block_id(&self, ino: u64) -> Option<&str> {
-            self.ino_to_id.get(&ino).map(String::as_str)
+        fn slot_of(&self, ino: u64) -> Option<u64> {
+            self.ino_to_slot.get(&ino).copied()
         }
 
-        fn remove(&mut self, id: &str) {
-            if let Some(ino) = self.id_to_ino.remove(id) {
-                self.ino_to_id.remove(&ino);
+        fn remove_slot(&mut self, slot: u64) {
+            if let Some(ino) = self.slot_to_ino.remove(&slot) {
+                self.ino_to_slot.remove(&ino);
             }
         }
     }
 
-    // ── Open-file cache ──────────────────────────────────────────────────────
+    // ── Open-file cache ───────────────────────────────────────────────────────
 
     struct OpenFile {
-        ino: u64,
-        block_id: String,
-        data: Vec<u8>,
+        ino:   u64,
+        slot:  u64,
+        data:  Vec<u8>,
         dirty: bool,
     }
 
-    // ── VenomFuse ────────────────────────────────────────────────────────────
+    // ── VenomFuse ─────────────────────────────────────────────────────────────
 
     pub struct VenomFuse {
-        pub(crate) vault: Arc<Vault>,
-        pub(crate) inodes: RwLock<InodeMap>,
+        pub(crate) container: Arc<VnmContainer>,
+        pub(crate) inodes:    RwLock<InodeMap>,
         pub(crate) open_files: HashMap<u64, OpenFile>,
         next_fh: u64,
     }
 
     impl VenomFuse {
-        pub fn new(vault: Arc<Vault>) -> Self {
-            let root_id = vault.root_id().to_string();
+        pub fn new(container: Arc<VnmContainer>) -> Self {
+            let root_slot = container.root_slot();
             Self {
-                vault,
-                inodes: RwLock::new(InodeMap::new(&root_id)),
+                container,
+                inodes: RwLock::new(InodeMap::new(root_slot)),
                 open_files: HashMap::new(),
                 next_fh: 1,
             }
         }
 
-        // ── Attribute builders ────────────────────────────────────────────
+        // ── Attr helpers ──────────────────────────────────────────────────────
 
         fn make_attr(&self, ino: u64, node: &VaultNode) -> FileAttr {
             match node {
                 VaultNode::Directory(_) => self.make_dir_attr(ino),
-                VaultNode::File(f) => self.make_file_attr(ino, f.total_size),
+                VaultNode::File(f)      => self.make_file_attr(ino, f.total_size),
             }
         }
 
         pub fn make_dir_attr(&self, ino: u64) -> FileAttr {
             let ts = UNIX_EPOCH;
-            let uid = unsafe { libc::getuid() };
-            let gid = unsafe { libc::getgid() };
-            FileAttr {
-                ino, size: 0, blocks: 0,
-                atime: ts, mtime: ts, ctime: ts, crtime: ts,
-                kind: FileType::Directory,
-                perm: 0o755, nlink: 2, uid, gid,
-                rdev: 0, blksize: 512, flags: 0,
-            }
+            let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+            FileAttr { ino, size: 0, blocks: 0, atime: ts, mtime: ts, ctime: ts, crtime: ts,
+                kind: FileType::Directory, perm: 0o755, nlink: 2, uid, gid,
+                rdev: 0, blksize: 512, flags: 0 }
         }
 
         pub fn make_file_attr(&self, ino: u64, size: u64) -> FileAttr {
             let ts = UNIX_EPOCH;
-            let uid = unsafe { libc::getuid() };
-            let gid = unsafe { libc::getgid() };
-            FileAttr {
-                ino, size,
-                blocks: (size + 511) / 512,
+            let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+            FileAttr { ino, size, blocks: (size + 511) / 512,
                 atime: ts, mtime: ts, ctime: ts, crtime: ts,
-                kind: FileType::RegularFile,
-                perm: 0o644, nlink: 1, uid, gid,
-                rdev: 0, blksize: 4096, flags: 0,
-            }
+                kind: FileType::RegularFile, perm: 0o644, nlink: 1, uid, gid,
+                rdev: 0, blksize: 4096, flags: 0 }
         }
 
-        // ── Internal helpers ──────────────────────────────────────────────
+        // ── Internal helpers ──────────────────────────────────────────────────
 
         fn alloc_fh(&mut self) -> u64 {
             let fh = self.next_fh;
@@ -170,39 +142,37 @@ pub mod driver {
             fh
         }
 
-        pub fn block_id_of(&self, ino: u64) -> Option<String> {
-            self.inodes.read().unwrap().block_id(ino).map(str::to_string)
+        pub fn slot_of_ino(&self, ino: u64) -> Option<u64> {
+            self.inodes.read().unwrap().slot_of(ino)
         }
 
-        fn read_dir_block(&self, id: &str) -> Result<DirectoryBlock, i32> {
-            match self.vault.read_node(id) {
+        fn read_dir_block(&self, slot: u64) -> Result<DirectoryBlock, i32> {
+            match self.container.read_node(slot) {
                 Ok(VaultNode::Directory(d)) => Ok(d),
-                Ok(_) => Err(ENOTDIR),
+                Ok(_)  => Err(ENOTDIR),
                 Err(_) => Err(EIO),
             }
         }
 
-        fn dir_add_entry(&self, parent_id: &str, entry: DirEntry) -> Result<(), i32> {
-            let mut dir = self.read_dir_block(parent_id)?;
-            if dir.entries.iter().any(|e| e.name == entry.name) {
-                return Err(EEXIST);
-            }
+        fn dir_add_entry(&self, parent_slot: u64, entry: DirEntry) -> Result<(), i32> {
+            let mut dir = self.read_dir_block(parent_slot)?;
+            if dir.entries.iter().any(|e| e.name == entry.name) { return Err(EEXIST); }
             dir.entries.push(entry);
-            self.vault.update_node(parent_id, &VaultNode::Directory(dir)).map_err(|_| EIO)
+            self.container.update_node(parent_slot, &VaultNode::Directory(dir)).map_err(|_| EIO)
         }
 
-        fn dir_remove_entry(&self, parent_id: &str, name: &str) -> Result<String, i32> {
-            let mut dir = self.read_dir_block(parent_id)?;
+        fn dir_remove_entry(&self, parent_slot: u64, name: &str) -> Result<u64, i32> {
+            let mut dir = self.read_dir_block(parent_slot)?;
             let pos = dir.entries.iter().position(|e| e.name == name).ok_or(ENOENT)?;
-            let removed_id = dir.entries.remove(pos).block_id;
-            self.vault.update_node(parent_id, &VaultNode::Directory(dir)).map_err(|_| EIO)?;
-            Ok(removed_id)
+            let removed_slot = dir.entries.remove(pos).slot;
+            self.container.update_node(parent_slot, &VaultNode::Directory(dir)).map_err(|_| EIO)?;
+            Ok(removed_slot)
         }
 
         pub fn load_file_data(&self, f: &FileBlock) -> Result<Vec<u8>, i32> {
             let mut data = f.data.clone();
-            for cont_id in &f.continuation_ids {
-                match self.vault.read_node(cont_id) {
+            for &cont_slot in &f.continuation_slots {
+                match self.container.read_node(cont_slot) {
                     Ok(VaultNode::File(c)) => data.extend_from_slice(&c.data),
                     _ => return Err(EIO),
                 }
@@ -211,58 +181,64 @@ pub mod driver {
             Ok(data)
         }
 
-        fn persist_file_data(&self, first_id: &str, existing: &FileBlock, new_data: Vec<u8>) -> Result<(), i32> {
-            for cont_id in &existing.continuation_ids {
-                let _ = self.vault.store.delete(cont_id);
-                self.inodes.write().unwrap().remove(cont_id);
+        fn persist_file_data(&self, first_slot: u64, existing: &FileBlock, new_data: Vec<u8>) -> Result<(), i32> {
+            // Free old continuation slots
+            for &cont_slot in &existing.continuation_slots {
+                self.container.free_node(cont_slot);
+                self.inodes.write().unwrap().remove_slot(cont_slot);
             }
+
             let total_size = new_data.len() as u64;
-            let mut chunks = new_data.chunks(BLOCK_DATA_CAPACITY);
+            let mut chunks = new_data.chunks(FILE_DATA_CHUNK);
             let first_chunk = chunks.next().unwrap_or(&[]).to_vec();
-            let mut cont_ids: Vec<String> = vec![];
+            let mut cont_slots: Vec<u64> = vec![];
+
             for chunk in chunks {
                 let cont = VaultNode::File(FileBlock {
                     kind: NodeKind::FileContinuation,
                     total_size: 0,
-                    continuation_ids: vec![],
+                    continuation_slots: vec![],
                     data: chunk.to_vec(),
                 });
-                cont_ids.push(self.vault.write_node(&cont).map_err(|_| EIO)?);
+                let s = self.container.write_node(&cont).map_err(|_| EIO)?;
+                cont_slots.push(s);
             }
-            self.vault.update_node(first_id, &VaultNode::File(FileBlock {
+
+            self.container.update_node(first_slot, &VaultNode::File(FileBlock {
                 kind: NodeKind::File,
                 total_size,
-                continuation_ids: cont_ids,
+                continuation_slots: cont_slots,
                 data: first_chunk,
             })).map_err(|_| EIO)
         }
 
-        fn cache_open(&mut self, ino: u64, block_id: String, data: Vec<u8>) -> u64 {
+        // ── Cache helpers ─────────────────────────────────────────────────────
+
+        fn cache_open(&mut self, ino: u64, slot: u64, data: Vec<u8>) -> u64 {
             let fh = self.alloc_fh();
-            self.open_files.insert(fh, OpenFile { ino, block_id, data, dirty: false });
+            self.open_files.insert(fh, OpenFile { ino, slot, data, dirty: false });
             fh
         }
 
         fn flush_fh(&mut self, fh: u64) -> Result<(), i32> {
-            let (block_id, data, dirty) = match self.open_files.get(&fh) {
-                Some(of) => (of.block_id.clone(), of.data.clone(), of.dirty),
-                None => return Ok(()),
+            let (slot, data, dirty) = match self.open_files.get(&fh) {
+                Some(of) => (of.slot, of.data.clone(), of.dirty),
+                None     => return Ok(()),
             };
             if !dirty { return Ok(()); }
-            let fb = match self.vault.read_node(&block_id) {
+            let fb = match self.container.read_node(slot) {
                 Ok(VaultNode::File(f)) => f,
                 _ => return Err(EIO),
             };
-            self.persist_file_data(&block_id, &fb, data)?;
-            if let Some(of) = self.open_files.get_mut(&fh) {
-                of.dirty = false;
-            }
+            self.persist_file_data(slot, &fb, data)?;
+            if let Some(of) = self.open_files.get_mut(&fh) { of.dirty = false; }
             Ok(())
         }
 
         fn flush_all(&mut self) {
             let fhs: Vec<u64> = self.open_files.keys().copied().collect();
             for fh in fhs { let _ = self.flush_fh(fh); }
+            let _ = self.container.flush();
         }
 
         fn cached_size_for_ino(&self, ino: u64) -> Option<u64> {
@@ -271,172 +247,144 @@ pub mod driver {
                 .map(|of| of.data.len() as u64)
         }
 
-        // ── Core operations (pub(crate) so integration tests can call them) ─
+        // ── Core operations (pub for integration tests) ───────────────────────
 
-        /// Resolve `name` in `parent` → (ino, node).
         pub fn op_lookup(&mut self, parent: u64, name: &str) -> Result<(u64, VaultNode), i32> {
-            let parent_id = self.block_id_of(parent).ok_or(ENOENT)?;
-            let dir = self.read_dir_block(&parent_id)?;
-            let entry = dir.entries.iter().find(|e| e.name == name).ok_or(ENOENT)?;
-            let child_id = entry.block_id.clone();
-            let node = self.vault.read_node(&child_id).map_err(|_| EIO)?;
-            let ino = self.inodes.write().unwrap().get_or_alloc(&child_id);
+            let p_slot = self.slot_of_ino(parent).ok_or(ENOENT)?;
+            let dir    = self.read_dir_block(p_slot)?;
+            let entry  = dir.entries.iter().find(|e| e.name == name).ok_or(ENOENT)?;
+            let slot   = entry.slot;
+            let node   = self.container.read_node(slot).map_err(|_| EIO)?;
+            let ino    = self.inodes.write().unwrap().get_or_alloc(slot);
             Ok((ino, node))
         }
 
-        /// Create a subdirectory under `parent` → (ino, node).
         pub fn op_mkdir(&mut self, parent: u64, name: &str) -> Result<(u64, VaultNode), i32> {
-            let parent_id = self.block_id_of(parent).ok_or(ENOENT)?;
-            let new_dir = VaultNode::Directory(DirectoryBlock {
-                kind: NodeKind::Directory,
-                entries: vec![],
-            });
-            let new_id = self.vault.write_node(&new_dir).map_err(|_| EIO)?;
-            let entry = DirEntry { name: name.to_string(), block_id: new_id.clone(), kind: NodeKind::Directory };
-            if let Err(e) = self.dir_add_entry(&parent_id, entry) {
-                let _ = self.vault.store.delete(&new_id);
+            let p_slot = self.slot_of_ino(parent).ok_or(ENOENT)?;
+            let new_dir = VaultNode::Directory(DirectoryBlock { kind: NodeKind::Directory, entries: vec![] });
+            let slot = self.container.write_node(&new_dir).map_err(|_| EIO)?;
+            let entry = DirEntry { name: name.to_string(), slot, kind: NodeKind::Directory };
+            if let Err(e) = self.dir_add_entry(p_slot, entry) {
+                self.container.free_node(slot);
                 return Err(e);
             }
-            let ino = self.inodes.write().unwrap().get_or_alloc(&new_id);
+            let ino = self.inodes.write().unwrap().get_or_alloc(slot);
             Ok((ino, new_dir))
         }
 
-        /// Remove an empty subdirectory.
         pub fn op_rmdir(&mut self, parent: u64, name: &str) -> Result<(), i32> {
-            let parent_id = self.block_id_of(parent).ok_or(ENOENT)?;
-            let dir = self.read_dir_block(&parent_id)?;
-            let target_id = dir.entries.iter().find(|e| e.name == name).ok_or(ENOENT)?.block_id.clone();
-            if !self.read_dir_block(&target_id)?.entries.is_empty() {
-                return Err(ENOTEMPTY);
-            }
-            let removed = self.dir_remove_entry(&parent_id, name)?;
-            let _ = self.vault.store.delete(&removed);
-            self.inodes.write().unwrap().remove(&removed);
+            let p_slot = self.slot_of_ino(parent).ok_or(ENOENT)?;
+            let dir    = self.read_dir_block(p_slot)?;
+            let t_slot = dir.entries.iter().find(|e| e.name == name).ok_or(ENOENT)?.slot;
+            if !self.read_dir_block(t_slot)?.entries.is_empty() { return Err(ENOTEMPTY); }
+            let removed = self.dir_remove_entry(p_slot, name)?;
+            self.container.free_node(removed);
+            self.inodes.write().unwrap().remove_slot(removed);
             Ok(())
         }
 
-        /// Create an empty file under `parent` → (ino, fh).
         pub fn op_create(&mut self, parent: u64, name: &str) -> Result<(u64, u64), i32> {
-            let parent_id = self.block_id_of(parent).ok_or(ENOENT)?;
-            let empty = VaultNode::File(FileBlock {
-                kind: NodeKind::File,
-                total_size: 0,
-                continuation_ids: vec![],
-                data: vec![],
-            });
-            let new_id = self.vault.write_node(&empty).map_err(|_| EIO)?;
-            let entry = DirEntry { name: name.to_string(), block_id: new_id.clone(), kind: NodeKind::File };
-            if let Err(e) = self.dir_add_entry(&parent_id, entry) {
-                let _ = self.vault.store.delete(&new_id);
+            let p_slot = self.slot_of_ino(parent).ok_or(ENOENT)?;
+            let empty  = VaultNode::File(FileBlock { kind: NodeKind::File, total_size: 0, continuation_slots: vec![], data: vec![] });
+            let slot   = self.container.write_node(&empty).map_err(|_| EIO)?;
+            let entry  = DirEntry { name: name.to_string(), slot, kind: NodeKind::File };
+            if let Err(e) = self.dir_add_entry(p_slot, entry) {
+                self.container.free_node(slot);
                 return Err(e);
             }
-            let ino = self.inodes.write().unwrap().get_or_alloc(&new_id);
-            let fh = self.cache_open(ino, new_id, vec![]);
+            let ino = self.inodes.write().unwrap().get_or_alloc(slot);
+            let fh  = self.cache_open(ino, slot, vec![]);
             Ok((ino, fh))
         }
 
-        /// Delete a file from `parent`.
         pub fn op_unlink(&mut self, parent: u64, name: &str) -> Result<(), i32> {
-            let parent_id = self.block_id_of(parent).ok_or(ENOENT)?;
-            let removed = self.dir_remove_entry(&parent_id, name)?;
-            self.open_files.retain(|_, of| of.block_id != removed);
-            if let Ok(VaultNode::File(f)) = self.vault.read_node(&removed) {
-                for cid in &f.continuation_ids {
-                    let _ = self.vault.store.delete(cid);
-                    self.inodes.write().unwrap().remove(cid);
+            let p_slot  = self.slot_of_ino(parent).ok_or(ENOENT)?;
+            let removed = self.dir_remove_entry(p_slot, name)?;
+            self.open_files.retain(|_, of| of.slot != removed);
+            if let Ok(VaultNode::File(f)) = self.container.read_node(removed) {
+                for &c in &f.continuation_slots {
+                    self.container.free_node(c);
+                    self.inodes.write().unwrap().remove_slot(c);
                 }
             }
-            let _ = self.vault.store.delete(&removed);
-            self.inodes.write().unwrap().remove(&removed);
+            self.container.free_node(removed);
+            self.inodes.write().unwrap().remove_slot(removed);
             Ok(())
         }
 
-        /// Move/rename an entry. Overwrites destination if it exists.
         pub fn op_rename(&mut self, parent: u64, name: &str, newparent: u64, newname: &str) -> Result<(), i32> {
-            let parent_id = self.block_id_of(parent).ok_or(ENOENT)?;
-            let newparent_id = self.block_id_of(newparent).ok_or(ENOENT)?;
-            let moved_id = self.dir_remove_entry(&parent_id, name)?;
-            let kind = match self.vault.read_node(&moved_id).map_err(|_| EIO)? {
+            let p_slot  = self.slot_of_ino(parent).ok_or(ENOENT)?;
+            let np_slot = self.slot_of_ino(newparent).ok_or(ENOENT)?;
+            let moved   = self.dir_remove_entry(p_slot, name)?;
+            let kind = match self.container.read_node(moved).map_err(|_| EIO)? {
                 VaultNode::Directory(_) => NodeKind::Directory,
                 _ => NodeKind::File,
             };
-            let mut dest_dir = self.read_dir_block(&newparent_id)?;
-            if let Some(pos) = dest_dir.entries.iter().position(|e| e.name == newname) {
-                let old_id = dest_dir.entries.remove(pos).block_id;
-                let _ = self.vault.store.delete(&old_id);
-                self.inodes.write().unwrap().remove(&old_id);
+            let mut dest = self.read_dir_block(np_slot)?;
+            if let Some(pos) = dest.entries.iter().position(|e| e.name == newname) {
+                let old = dest.entries.remove(pos).slot;
+                self.container.free_node(old);
+                self.inodes.write().unwrap().remove_slot(old);
             }
-            dest_dir.entries.push(DirEntry { name: newname.to_string(), block_id: moved_id, kind });
-            self.vault.update_node(&newparent_id, &VaultNode::Directory(dest_dir)).map_err(|_| EIO)
+            dest.entries.push(DirEntry { name: newname.to_string(), slot: moved, kind });
+            self.container.update_node(np_slot, &VaultNode::Directory(dest)).map_err(|_| EIO)
         }
 
-        /// Open a file and load its data into cache → fh.
         pub fn op_open(&mut self, ino: u64) -> Result<u64, i32> {
-            let id = self.block_id_of(ino).ok_or(ENOENT)?;
-            let fb = match self.vault.read_node(&id).map_err(|_| EIO)? {
+            let slot = self.slot_of_ino(ino).ok_or(ENOENT)?;
+            let fb   = match self.container.read_node(slot).map_err(|_| EIO)? {
                 VaultNode::File(f) => f,
                 _ => return Err(EISDIR),
             };
             let data = self.load_file_data(&fb)?;
-            Ok(self.cache_open(ino, id, data))
+            Ok(self.cache_open(ino, slot, data))
         }
 
-        /// Flush dirty cache entry to disk.
-        pub fn op_flush(&mut self, fh: u64) -> Result<(), i32> {
-            self.flush_fh(fh)
-        }
+        pub fn op_flush(&mut self, fh: u64)            -> Result<(), i32> { self.flush_fh(fh) }
+        pub fn op_release(&mut self, fh: u64)          -> Result<(), i32> { self.flush_fh(fh)?; self.open_files.remove(&fh); Ok(()) }
 
-        /// Flush + evict from cache.
-        pub fn op_release(&mut self, fh: u64) -> Result<(), i32> {
-            self.flush_fh(fh)?;
-            self.open_files.remove(&fh);
-            Ok(())
-        }
-
-        /// Read bytes from cache (or disk as fallback) → Vec<u8>.
         pub fn op_read(&mut self, ino: u64, fh: u64, offset: i64, size: u32) -> Result<Vec<u8>, i32> {
             if let Some(of) = self.open_files.get(&fh) {
                 let start = (offset as usize).min(of.data.len());
-                let end = (start + size as usize).min(of.data.len());
+                let end   = (start + size as usize).min(of.data.len());
                 return Ok(of.data[start..end].to_vec());
             }
-            let id = self.block_id_of(ino).ok_or(ENOENT)?;
-            let fb = match self.vault.read_node(&id).map_err(|_| EIO)? {
+            // Fallback (no open handle — shouldn't happen with FOPEN_DIRECT_IO)
+            let slot = self.slot_of_ino(ino).ok_or(ENOENT)?;
+            let fb = match self.container.read_node(slot).map_err(|_| EIO)? {
                 VaultNode::File(f) => f,
                 _ => return Err(EISDIR),
             };
             let data = self.load_file_data(&fb)?;
             let start = (offset as usize).min(data.len());
-            let end = (start + size as usize).min(data.len());
+            let end   = (start + size as usize).min(data.len());
             Ok(data[start..end].to_vec())
         }
 
-        /// Write bytes to cache → bytes written. Defers disk I/O.
         pub fn op_write(&mut self, ino: u64, fh: u64, offset: i64, data: &[u8]) -> Result<u32, i32> {
             if let Some(of) = self.open_files.get_mut(&fh) {
                 let start = offset as usize;
-                let end = start + data.len();
+                let end   = start + data.len();
                 if end > of.data.len() { of.data.resize(end, 0); }
                 of.data[start..end].copy_from_slice(data);
                 of.dirty = true;
                 return Ok(data.len() as u32);
             }
-            // Fallback: direct disk write
-            let id = self.block_id_of(ino).ok_or(ENOENT)?;
-            let fb = match self.vault.read_node(&id).map_err(|_| EIO)? {
+            // Fallback
+            let slot = self.slot_of_ino(ino).ok_or(ENOENT)?;
+            let fb = match self.container.read_node(slot).map_err(|_| EIO)? {
                 VaultNode::File(f) => f,
                 _ => return Err(EISDIR),
             };
             let mut buf = self.load_file_data(&fb)?;
             let start = offset as usize;
-            let end = start + data.len();
+            let end   = start + data.len();
             if end > buf.len() { buf.resize(end, 0); }
             buf[start..end].copy_from_slice(data);
-            self.persist_file_data(&id, &fb, buf)?;
+            self.persist_file_data(slot, &fb, buf)?;
             Ok(data.len() as u32)
         }
 
-        /// Resize a file (truncate / extend with zero bytes).
         pub fn op_setattr_size(&mut self, ino: u64, fh_hint: Option<u64>, new_size: u64) -> Result<(), i32> {
             let fh = fh_hint.or_else(|| {
                 self.open_files.iter().find(|(_, of)| of.ino == ino).map(|(&f, _)| f)
@@ -448,18 +396,18 @@ pub mod driver {
                     return Ok(());
                 }
             }
-            let id = self.block_id_of(ino).ok_or(ENOENT)?;
-            let fb = match self.vault.read_node(&id).map_err(|_| EIO)? {
+            let slot = self.slot_of_ino(ino).ok_or(ENOENT)?;
+            let fb = match self.container.read_node(slot).map_err(|_| EIO)? {
                 VaultNode::File(f) => f,
                 _ => return Err(EISDIR),
             };
             let mut data = self.load_file_data(&fb)?;
             data.resize(new_size as usize, 0);
-            self.persist_file_data(&id, &fb, data)
+            self.persist_file_data(slot, &fb, data)
         }
     }
 
-    // ── Filesystem trait (thin wrappers) ─────────────────────────────────────
+    // ── Filesystem trait ──────────────────────────────────────────────────────
 
     impl Filesystem for VenomFuse {
         fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
@@ -479,8 +427,8 @@ pub mod driver {
         }
 
         fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-            let id = match self.block_id_of(ino) { Some(id) => id, None => { reply.error(ENOENT); return; } };
-            match self.vault.read_node(&id) {
+            let slot = match self.slot_of_ino(ino) { Some(s) => s, None => { reply.error(ENOENT); return; } };
+            match self.container.read_node(slot) {
                 Ok(node) => {
                     let mut attr = self.make_attr(ino, &node);
                     if let VaultNode::File(_) = &node {
@@ -494,28 +442,20 @@ pub mod driver {
             }
         }
 
-        fn setattr(
-            &mut self, _req: &Request, ino: u64,
-            _mode: Option<u32>, _uid: Option<u32>, _gid: Option<u32>,
-            size: Option<u64>,
-            _atime: Option<TimeOrNow>, _mtime: Option<TimeOrNow>,
-            _ctime: Option<SystemTime>, fh: Option<u64>,
-            _crtime: Option<SystemTime>, _chgtime: Option<SystemTime>,
-            _bkuptime: Option<SystemTime>, _flags: Option<u32>,
-            reply: ReplyAttr,
+        fn setattr(&mut self, _req: &Request, ino: u64,
+            _mode: Option<u32>, _uid: Option<u32>, _gid: Option<u32>, size: Option<u64>,
+            _atime: Option<TimeOrNow>, _mtime: Option<TimeOrNow>, _ctime: Option<SystemTime>,
+            fh: Option<u64>, _crtime: Option<SystemTime>, _chgtime: Option<SystemTime>,
+            _bkuptime: Option<SystemTime>, _flags: Option<u32>, reply: ReplyAttr,
         ) {
             if let Some(new_size) = size {
-                if let Err(e) = self.op_setattr_size(ino, fh, new_size) {
-                    reply.error(e); return;
-                }
+                if let Err(e) = self.op_setattr_size(ino, fh, new_size) { reply.error(e); return; }
             }
-            let id = match self.block_id_of(ino) { Some(id) => id, None => { reply.error(ENOENT); return; } };
-            match self.vault.read_node(&id) {
+            let slot = match self.slot_of_ino(ino) { Some(s) => s, None => { reply.error(ENOENT); return; } };
+            match self.container.read_node(slot) {
                 Ok(node) => {
                     let mut attr = self.make_attr(ino, &node);
-                    if let Some(sz) = self.cached_size_for_ino(ino) {
-                        attr.size = sz; attr.blocks = (sz + 511) / 512;
-                    }
+                    if let Some(sz) = self.cached_size_for_ino(ino) { attr.size = sz; attr.blocks = (sz + 511) / 512; }
                     reply.attr(&TTL, &attr);
                 }
                 Err(_) => reply.error(EIO),
@@ -523,14 +463,14 @@ pub mod driver {
         }
 
         fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
-            let id = match self.block_id_of(ino) { Some(id) => id, None => { reply.error(ENOENT); return; } };
-            let dir = match self.read_dir_block(&id) { Ok(d) => d, Err(e) => { reply.error(e); return; } };
+            let slot = match self.slot_of_ino(ino) { Some(s) => s, None => { reply.error(ENOENT); return; } };
+            let dir  = match self.read_dir_block(slot) { Ok(d) => d, Err(e) => { reply.error(e); return; } };
             let mut entries: Vec<(u64, FileType, String)> = vec![
                 (ino, FileType::Directory, ".".into()),
                 (ino, FileType::Directory, "..".into()),
             ];
             for e in &dir.entries {
-                let child_ino = self.inodes.write().unwrap().get_or_alloc(&e.block_id);
+                let child_ino = self.inodes.write().unwrap().get_or_alloc(e.slot);
                 let ft = if e.kind == NodeKind::Directory { FileType::Directory } else { FileType::RegularFile };
                 entries.push((child_ino, ft, e.name.clone()));
             }
@@ -544,74 +484,41 @@ pub mod driver {
             let name = match name.to_str() { Some(n) => n, None => { reply.error(EINVAL); return; } };
             match self.op_mkdir(parent, name) {
                 Ok((ino, node)) => reply.entry(&TTL, &self.make_attr(ino, &node), 0),
-                Err(e) => reply.error(e),
+                Err(e)          => reply.error(e),
             }
         }
 
         fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
             let name = match name.to_str() { Some(n) => n, None => { reply.error(EINVAL); return; } };
-            match self.op_rmdir(parent, name) {
-                Ok(_) => reply.ok(),
-                Err(e) => reply.error(e),
-            }
+            match self.op_rmdir(parent, name) { Ok(_) => reply.ok(), Err(e) => reply.error(e) }
         }
 
         fn create(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, _umask: u32, _flags: i32, reply: ReplyCreate) {
             let name = match name.to_str() { Some(n) => n, None => { reply.error(EINVAL); return; } };
             match self.op_create(parent, name) {
-                Ok((ino, fh)) => {
-                    let attr = self.make_file_attr(ino, 0);
-                    reply.created(&TTL, &attr, 0, fh, FOPEN_DIRECT_IO);
-                }
-                Err(e) => reply.error(e),
+                Ok((ino, fh)) => reply.created(&TTL, &self.make_file_attr(ino, 0), 0, fh, FOPEN_DIRECT_IO),
+                Err(e)        => reply.error(e),
             }
         }
 
         fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
             let name = match name.to_str() { Some(n) => n, None => { reply.error(EINVAL); return; } };
-            match self.op_unlink(parent, name) {
-                Ok(_) => reply.ok(),
-                Err(e) => reply.error(e),
-            }
+            match self.op_unlink(parent, name) { Ok(_) => reply.ok(), Err(e) => reply.error(e) }
         }
 
         fn rename(&mut self, _req: &Request, parent: u64, name: &OsStr, newparent: u64, newname: &OsStr, _flags: u32, reply: ReplyEmpty) {
-            let name = match name.to_str() { Some(n) => n, None => { reply.error(EINVAL); return; } };
+            let name    = match name.to_str()    { Some(n) => n, None => { reply.error(EINVAL); return; } };
             let newname = match newname.to_str() { Some(n) => n, None => { reply.error(EINVAL); return; } };
-            match self.op_rename(parent, name, newparent, newname) {
-                Ok(_) => reply.ok(),
-                Err(e) => reply.error(e),
-            }
+            match self.op_rename(parent, name, newparent, newname) { Ok(_) => reply.ok(), Err(e) => reply.error(e) }
         }
 
         fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
-            match self.op_open(ino) {
-                Ok(fh) => reply.opened(fh, FOPEN_DIRECT_IO),
-                Err(e) => reply.error(e),
-            }
+            match self.op_open(ino) { Ok(fh) => reply.opened(fh, FOPEN_DIRECT_IO), Err(e) => reply.error(e) }
         }
 
         fn release(&mut self, _req: &Request, _ino: u64, fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty) {
-            // Always reply ok: POSIX says close() must not block on I/O errors.
-            // Flush errors are reported via flush() before release() is called.
             let _ = self.op_release(fh);
             reply.ok();
-        }
-
-        fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
-            // Report a large virtual disk so file managers don't refuse to
-            // create files due to apparent lack of space.
-            // The real limit is the underlying filesystem hosting the vault.
-            reply.statfs(
-                1 << 30, // blocks total  (~512 GB at 512 B/block)
-                1 << 30, // blocks free
-                1 << 30, // blocks available (non-root)
-                1 << 20, // inodes total
-                1 << 20, // inodes free
-                512,     // block size
-                255,     // max filename length
-                512,     // fragment size
-            );
         }
 
         fn flush(&mut self, _req: &Request, _ino: u64, fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
@@ -623,17 +530,17 @@ pub mod driver {
         }
 
         fn read(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData) {
-            match self.op_read(ino, fh, offset, size) {
-                Ok(data) => reply.data(&data),
-                Err(e) => reply.error(e),
-            }
+            match self.op_read(ino, fh, offset, size) { Ok(data) => reply.data(&data), Err(e) => reply.error(e) }
         }
 
         fn write(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, data: &[u8], _write_flags: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyWrite) {
-            match self.op_write(ino, fh, offset, data) {
-                Ok(n) => reply.written(n),
-                Err(e) => reply.error(e),
-            }
+            match self.op_write(ino, fh, offset, data) { Ok(n) => reply.written(n), Err(e) => reply.error(e) }
+        }
+
+        fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
+            let free = self.container.store.free.lock().unwrap().len() as u64;
+            let total = self.container.outer_limit;
+            reply.statfs(total, free, free, 1 << 20, 1 << 20, 4096, 255, 4096);
         }
     }
 
@@ -641,70 +548,65 @@ pub mod driver {
         fn drop(&mut self) { self.flush_all(); }
     }
 
-    /// Mount `vault` at `mountpoint` — blocks until unmounted.
-    pub fn mount(vault: Arc<Vault>, mountpoint: &str) -> crate::Result<()> {
-        let fs = VenomFuse::new(vault);
-        let options = vec![
-            MountOption::FSName("venom".into()),
-            // AutoUnmount and AllowOther both require elevated privileges or
-            // /etc/fuse.conf settings on many Linux distros — omitted for
-            // unprivileged use. Unmount explicitly with fusermount3 -u <mp>.
-        ];
+    /// Mount `container` at `mountpoint` — blocks until unmounted.
+    pub fn mount(container: Arc<VnmContainer>, mountpoint: &str) -> crate::Result<()> {
+        let fs = VenomFuse::new(container);
+        let options = vec![MountOption::FSName("venom".into())];
         fuser::mount2(fs, mountpoint, &options).map_err(VnmError::Io)
     }
 
-    // ── Cache unit tests ─────────────────────────────────────────────────────
+    // ── Integration tests ─────────────────────────────────────────────────────
 
     #[cfg(test)]
     mod tests {
         use super::*;
         use std::sync::Arc;
         use crate::container::CipherAlgorithm;
-        use crate::fs::vault::Vault;
-        use crate::storage::{NodeKind, VaultNode};
+        use crate::fs::container::VnmContainer;
         use crate::storage::vault_fs::{DirEntry, FileBlock};
+        use crate::storage::{NodeKind, VaultNode};
+
+        const MB: u64 = 1024 * 1024;
 
         fn tmp(label: &str) -> std::path::PathBuf {
-            std::env::temp_dir().join(format!("vnm_fuse_{label}_{}", std::process::id()))
+            std::env::temp_dir().join(format!("vnm_{label}_{}.vnm", std::process::id()))
         }
 
-        fn setup(label: &str) -> (Arc<Vault>, VenomFuse, std::path::PathBuf) {
+        fn setup(label: &str) -> (Arc<VnmContainer>, VenomFuse, std::path::PathBuf) {
             let path = tmp(label);
-            let _ = std::fs::remove_dir_all(&path);
-            let vault = Arc::new(
-                Vault::create(&path, b"pass", CipherAlgorithm::ChaCha20Poly1305, "interactive", None).unwrap(),
+            let _ = std::fs::remove_file(&path);
+            let c = Arc::new(
+                VnmContainer::create(&path, b"pass", 16 * MB, CipherAlgorithm::ChaCha20Poly1305, "interactive", None, None).unwrap(),
             );
-            let fuse = VenomFuse::new(vault.clone());
-            (vault, fuse, path)
+            let fuse = VenomFuse::new(c.clone());
+            (c, fuse, path)
         }
 
-        fn plant_file(vault: &Arc<Vault>, fuse: &mut VenomFuse, name: &str, content: &[u8]) -> (String, u64) {
+        fn plant_file(c: &Arc<VnmContainer>, fuse: &mut VenomFuse, name: &str, content: &[u8]) -> (u64, u64) {
             let node = VaultNode::File(FileBlock {
                 kind: NodeKind::File,
                 total_size: content.len() as u64,
-                continuation_ids: vec![],
+                continuation_slots: vec![],
                 data: content.to_vec(),
             });
-            let file_id = vault.write_node(&node).unwrap();
-            let root_id = vault.root_id().to_string();
-            let mut root = match vault.read_node(&root_id).unwrap() {
+            let slot = c.write_node(&node).unwrap();
+            let root_slot = c.root_slot();
+            let mut root = match c.read_node(root_slot).unwrap() {
                 VaultNode::Directory(d) => d,
                 _ => panic!(),
             };
-            root.entries.push(DirEntry { name: name.into(), block_id: file_id.clone(), kind: NodeKind::File });
-            vault.update_node(&root_id, &VaultNode::Directory(root)).unwrap();
-            let ino = fuse.inodes.write().unwrap().get_or_alloc(&file_id);
-            (file_id, ino)
+            root.entries.push(DirEntry { name: name.into(), slot, kind: NodeKind::File });
+            c.update_node(root_slot, &VaultNode::Directory(root)).unwrap();
+            let ino = fuse.inodes.write().unwrap().get_or_alloc(slot);
+            (slot, ino)
         }
 
-        fn disk_data(vault: &Arc<Vault>, file_id: &str) -> Vec<u8> {
-            match vault.read_node(file_id).unwrap() {
+        fn disk_data(c: &Arc<VnmContainer>, slot: u64) -> Vec<u8> {
+            match c.read_node(slot).unwrap() {
                 VaultNode::File(f) => {
                     let mut data = f.data.clone();
-                    for cid in &f.continuation_ids {
-                        if let Ok(VaultNode::File(c)) = vault.read_node(cid) {
-                            data.extend_from_slice(&c.data);
-                        }
+                    for &s in &f.continuation_slots {
+                        if let Ok(VaultNode::File(c2)) = c.read_node(s) { data.extend_from_slice(&c2.data); }
                     }
                     data.truncate(f.total_size as usize);
                     data
@@ -713,165 +615,89 @@ pub mod driver {
             }
         }
 
-        #[test]
-        fn cache_open_populates_entry() {
-            let (vault, mut fuse, path) = setup("open_entry");
-            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"hello");
-            let fh = fuse.cache_open(ino, file_id.clone(), b"hello".to_vec());
+        #[test] fn cache_open_populates_entry() {
+            let (c, mut fuse, path) = setup("open_entry");
+            let (slot, ino) = plant_file(&c, &mut fuse, "f.txt", b"hello");
+            let fh = fuse.cache_open(ino, slot, b"hello".to_vec());
             let of = fuse.open_files.get(&fh).unwrap();
-            assert_eq!(of.data, b"hello");
-            assert_eq!(of.ino, ino);
-            assert_eq!(of.block_id, file_id);
-            assert!(!of.dirty);
-            std::fs::remove_dir_all(&path).ok();
+            assert_eq!(of.data, b"hello");  assert_eq!(of.ino, ino);  assert!(!of.dirty);
+            std::fs::remove_file(&path).ok();
         }
 
-        #[test]
-        fn write_marks_dirty_no_disk_change() {
-            let (vault, mut fuse, path) = setup("write_dirty");
-            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"original");
-            let fh = fuse.cache_open(ino, file_id.clone(), b"original".to_vec());
-            let of = fuse.open_files.get_mut(&fh).unwrap();
-            of.data = b"modified".to_vec();
-            of.dirty = true;
-            assert!(fuse.open_files[&fh].dirty);
-            assert_eq!(disk_data(&vault, &file_id), b"original");
-            std::fs::remove_dir_all(&path).ok();
+        #[test] fn write_marks_dirty_no_disk_change() {
+            let (c, mut fuse, path) = setup("write_dirty");
+            let (slot, ino) = plant_file(&c, &mut fuse, "f.txt", b"original");
+            let fh = fuse.cache_open(ino, slot, b"original".to_vec());
+            fuse.open_files.get_mut(&fh).unwrap().data = b"modified".to_vec();
+            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
+            assert_eq!(disk_data(&c, slot), b"original");
+            std::fs::remove_file(&path).ok();
         }
 
-        #[test]
-        fn flush_persists_and_clears_dirty() {
-            let (vault, mut fuse, path) = setup("flush_persist");
-            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"v1");
-            let fh = fuse.cache_open(ino, file_id.clone(), b"v2 persisted".to_vec());
+        #[test] fn flush_persists_and_clears_dirty() {
+            let (c, mut fuse, path) = setup("flush_persist");
+            let (slot, ino) = plant_file(&c, &mut fuse, "f.txt", b"v1");
+            let fh = fuse.cache_open(ino, slot, b"v2".to_vec());
             fuse.open_files.get_mut(&fh).unwrap().dirty = true;
             fuse.flush_fh(fh).unwrap();
             assert!(!fuse.open_files[&fh].dirty);
-            assert_eq!(disk_data(&vault, &file_id), b"v2 persisted");
-            std::fs::remove_dir_all(&path).ok();
+            assert_eq!(disk_data(&c, slot), b"v2");
+            std::fs::remove_file(&path).ok();
         }
 
-        #[test]
-        fn flush_noop_when_clean() {
-            let (vault, mut fuse, path) = setup("flush_noop");
-            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"data");
-            let fh = fuse.cache_open(ino, file_id.clone(), b"data".to_vec());
-            fuse.flush_fh(fh).unwrap();
-            assert_eq!(disk_data(&vault, &file_id), b"data");
-            std::fs::remove_dir_all(&path).ok();
-        }
-
-        #[test]
-        fn release_flushes_then_evicts() {
-            let (vault, mut fuse, path) = setup("release");
-            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"before");
-            let fh = fuse.cache_open(ino, file_id.clone(), b"after".to_vec());
-            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
-            fuse.flush_fh(fh).unwrap();
-            fuse.open_files.remove(&fh);
-            assert!(!fuse.open_files.contains_key(&fh));
-            assert_eq!(disk_data(&vault, &file_id), b"after");
-            std::fs::remove_dir_all(&path).ok();
-        }
-
-        #[test]
-        fn cached_size_reflects_dirty_buffer() {
-            let (vault, mut fuse, path) = setup("cached_size");
-            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"abc");
-            assert_eq!(fuse.cached_size_for_ino(ino), None);
-            let fh = fuse.cache_open(ino, file_id, b"a longer string here".to_vec());
-            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
-            assert_eq!(fuse.cached_size_for_ino(ino), Some(20));
-            std::fs::remove_dir_all(&path).ok();
-        }
-
-        #[test]
-        fn drop_flushes_dirty_files() {
+        #[test] fn drop_flushes_dirty_files() {
             let path = tmp("drop_flush");
-            let _ = std::fs::remove_dir_all(&path);
-            let vault = Arc::new(
-                Vault::create(&path, b"pass", CipherAlgorithm::ChaCha20Poly1305, "interactive", None).unwrap(),
-            );
-            let file_id = {
-                let mut fuse = VenomFuse::new(vault.clone());
-                let (fid, ino) = plant_file(&vault, &mut fuse, "f.txt", b"init");
-                let fh = fuse.cache_open(ino, fid.clone(), b"flushed by drop".to_vec());
+            let _ = std::fs::remove_file(&path);
+            let c = Arc::new(VnmContainer::create(&path, b"pass", 16*MB, CipherAlgorithm::ChaCha20Poly1305, "interactive", None, None).unwrap());
+            let slot = {
+                let mut fuse = VenomFuse::new(c.clone());
+                let (s, ino) = plant_file(&c, &mut fuse, "f.txt", b"init");
+                let fh = fuse.cache_open(ino, s, b"by drop".to_vec());
                 fuse.open_files.get_mut(&fh).unwrap().dirty = true;
-                fid
+                s
             };
-            assert_eq!(disk_data(&vault, &file_id), b"flushed by drop");
-            std::fs::remove_dir_all(&path).ok();
+            assert_eq!(disk_data(&c, slot), b"by drop");
+            std::fs::remove_file(&path).ok();
         }
 
-        #[test]
-        fn multiple_flush_cycles() {
-            let (vault, mut fuse, path) = setup("multi_flush");
-            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"v1");
-            let fh = fuse.cache_open(ino, file_id.clone(), b"version 2".to_vec());
-            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
-            fuse.flush_fh(fh).unwrap();
-            assert_eq!(disk_data(&vault, &file_id), b"version 2");
-            fuse.open_files.get_mut(&fh).unwrap().data = b"version 3".to_vec();
-            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
-            fuse.flush_fh(fh).unwrap();
-            assert_eq!(disk_data(&vault, &file_id), b"version 3");
-            std::fs::remove_dir_all(&path).ok();
+        #[test] fn op_mkdir_creates_directory() {
+            let (_c, mut fuse, path) = setup("mkdir");
+            fuse.op_mkdir(ROOT_INO, "docs").unwrap();
+            let (_, node) = fuse.op_lookup(ROOT_INO, "docs").unwrap();
+            assert!(matches!(node, VaultNode::Directory(_)));
+            std::fs::remove_file(&path).ok();
         }
 
-        #[test]
-        fn unlink_evicts_without_flushing() {
-            let (vault, mut fuse, path) = setup("unlink_evict");
-            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"disk-content");
-            let fh = fuse.cache_open(ino, file_id.clone(), b"NOT-to-be-flushed".to_vec());
-            fuse.open_files.get_mut(&fh).unwrap().dirty = true;
-            fuse.open_files.retain(|_, of| of.block_id != file_id);
-            assert!(!fuse.open_files.contains_key(&fh));
-            assert_eq!(disk_data(&vault, &file_id), b"disk-content");
-            std::fs::remove_dir_all(&path).ok();
+        #[test] fn op_create_write_release_open_read() {
+            let (_c, mut fuse, path) = setup("create_cycle");
+            let (ino, fh) = fuse.op_create(ROOT_INO, "note.txt").unwrap();
+            fuse.op_write(ino, fh, 0, b"hello venom").unwrap();
+            fuse.op_release(fh).unwrap();
+            let fh2 = fuse.op_open(ino).unwrap();
+            let data = fuse.op_read(ino, fh2, 0, 1024).unwrap();
+            assert_eq!(data, b"hello venom");
+            std::fs::remove_file(&path).ok();
         }
 
-        #[test]
-        fn two_fhs_last_flush_wins() {
-            let (vault, mut fuse, path) = setup("two_fhs");
-            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"base");
-            let fh1 = fuse.cache_open(ino, file_id.clone(), b"from-fh1".to_vec());
-            let fh2 = fuse.cache_open(ino, file_id.clone(), b"from-fh2".to_vec());
-            fuse.open_files.get_mut(&fh1).unwrap().dirty = true;
-            fuse.open_files.get_mut(&fh2).unwrap().dirty = true;
-            fuse.flush_fh(fh1).unwrap();
-            assert_eq!(disk_data(&vault, &file_id), b"from-fh1");
-            fuse.flush_fh(fh2).unwrap();
-            assert_eq!(disk_data(&vault, &file_id), b"from-fh2");
-            std::fs::remove_dir_all(&path).ok();
+        #[test] fn op_unlink_removes_file() {
+            let (_c, mut fuse, path) = setup("unlink");
+            fuse.op_create(ROOT_INO, "bye.txt").unwrap();
+            fuse.op_unlink(ROOT_INO, "bye.txt").unwrap();
+            assert_eq!(fuse.op_lookup(ROOT_INO, "bye.txt").unwrap_err(), ENOENT);
+            std::fs::remove_file(&path).ok();
         }
 
-        #[test]
-        fn setattr_truncate_updates_cache() {
-            let (vault, mut fuse, path) = setup("setattr_trunc");
-            let (file_id, ino) = plant_file(&vault, &mut fuse, "f.txt", b"hello world");
-            let fh = fuse.cache_open(ino, file_id.clone(), b"hello world".to_vec());
-            let of = fuse.open_files.get_mut(&fh).unwrap();
-            of.data.resize(5, 0);
-            of.dirty = true;
-            assert_eq!(fuse.open_files[&fh].data, b"hello");
-            assert_eq!(fuse.cached_size_for_ino(ino), Some(5));
-            fuse.flush_fh(fh).unwrap();
-            assert_eq!(disk_data(&vault, &file_id), b"hello");
-            std::fs::remove_dir_all(&path).ok();
-        }
-
-        #[test]
-        fn alloc_fh_monotonic_nonzero() {
-            let path = tmp("alloc_fh");
-            let _ = std::fs::remove_dir_all(&path);
-            let vault = Arc::new(
-                Vault::create(&path, b"pass", CipherAlgorithm::ChaCha20Poly1305, "interactive", None).unwrap(),
-            );
-            let mut fuse = VenomFuse::new(vault);
-            let fhs: Vec<u64> = (0..10).map(|_| fuse.alloc_fh()).collect();
-            for &fh in &fhs { assert_ne!(fh, 0); }
-            for w in fhs.windows(2) { assert!(w[1] > w[0]); }
-            std::fs::remove_dir_all(&path).ok();
+        #[test] fn op_rename_within_dir() {
+            let (_c, mut fuse, path) = setup("rename");
+            let (ino, fh) = fuse.op_create(ROOT_INO, "old.txt").unwrap();
+            fuse.op_write(ino, fh, 0, b"data").unwrap();
+            fuse.op_release(fh).unwrap();
+            fuse.op_rename(ROOT_INO, "old.txt", ROOT_INO, "new.txt").unwrap();
+            assert_eq!(fuse.op_lookup(ROOT_INO, "old.txt").unwrap_err(), ENOENT);
+            let (new_ino, _) = fuse.op_lookup(ROOT_INO, "new.txt").unwrap();
+            let fh2 = fuse.op_open(new_ino).unwrap();
+            assert_eq!(fuse.op_read(new_ino, fh2, 0, 1024).unwrap(), b"data");
+            std::fs::remove_file(&path).ok();
         }
     }
 }

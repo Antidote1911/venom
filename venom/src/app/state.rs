@@ -17,9 +17,10 @@ pub enum MountStatus {
     Mounting,
     /// FUSE filesystem live and accepting writes.
     Mounted {
-        label: Option<String>,
-        cipher: String,
+        label:      Option<String>,
+        cipher:     String,
         created_at: u64,
+        is_hidden:  bool,
     },
     /// Mount failed (wrong password, I/O error, FUSE error…).
     Error(String),
@@ -43,7 +44,7 @@ pub struct VenomApp {
 
     pub recent: RecentList,
     /// Vault paths whose label/cipher have already been synced into `recent`.
-    recent_enriched: HashSet<String>,
+    pub recent_enriched: HashSet<String>,
 
     pub create_view: CreateView,
     pub mount_view: MountView,

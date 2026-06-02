@@ -165,7 +165,7 @@ fn vault_card(
                             mono_row(ui, "mount", mountpoint);
                         }
 
-                        MountStatus::Mounted { label, cipher, created_at } => {
+                        MountStatus::Mounted { label, cipher, created_at, is_hidden } => {
                             let title = label.as_deref().unwrap_or("Unnamed vault");
                             ui.horizontal(|ui| {
                                 ui.label(
