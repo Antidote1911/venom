@@ -4,6 +4,59 @@ use vnmcore::fs::container::{VnmContainer, HiddenVolumeOptions};
 use crate::app::state::{MountStatus, MountedVault, Screen, VenomApp};
 use crate::recent::read_cipher_from_bootstrap;
 
+/// Background thread that opens the container, signals Mounted, then blocks on the
+/// OS-level mount. Works on Linux/macOS (FUSE) and Windows (WinFSP).
+fn mount_thread(
+    status:     Arc<Mutex<MountStatus>>,
+    vault_path: String,
+    mountpoint: String,
+    password:   Vec<u8>,
+    ctx:        egui::Context,
+) {
+    match VnmContainer::open(&vault_path, &password) {
+        Ok(c) => {
+            *status.lock().unwrap() = MountStatus::Mounted {
+                label:      c.label.clone(),
+                cipher:     c.cipher.to_string(),
+                created_at: c.created_at,
+                is_hidden:  c.is_hidden,
+            };
+            ctx.request_repaint();
+
+            let result = platform_mount(Arc::new(c), &mountpoint);
+
+            match result {
+                Ok(_) => {
+                    *status.lock().unwrap() = MountStatus::Gone;
+                }
+                Err(e) => {
+                    *status.lock().unwrap() = MountStatus::Error(format!("{e}"));
+                }
+            }
+            ctx.request_repaint();
+        }
+        Err(e) => {
+            *status.lock().unwrap() = MountStatus::Error(e.to_string());
+            ctx.request_repaint();
+        }
+    }
+}
+
+/// Dispatch to the right mount backend for this platform.
+fn platform_mount(container: Arc<VnmContainer>, mountpoint: &str) -> vnmcore::Result<()> {
+    // Linux / macOS → FUSE
+    #[cfg(target_family = "unix")]
+    return vnmcore::fs::fuse::driver::mount(container, mountpoint);
+
+    // Windows → WinFSP
+    #[cfg(target_os = "windows")]
+    return vnmcore::fs::winfsp::mount(container, mountpoint);
+
+    // Compile-time unreachable on all currently supported platforms
+    #[allow(unreachable_code)]
+    Err(vnmcore::VnmError::InvalidFormat("Unsupported platform".into()))
+}
+
 impl VenomApp {
     // ── Create ────────────────────────────────────────────────────────────────
 
@@ -117,40 +170,12 @@ impl VenomApp {
         let password   = v.password.as_bytes().to_vec();
         let ctx        = self.egui_ctx.clone();
 
-        #[cfg(target_family = "unix")]
         std::thread::Builder::new()
             .name(format!("vnm-mount:{mountpoint}"))
             .spawn(move || {
-                use vnmcore::fs::fuse::driver;
-                match VnmContainer::open(&vault_path, &password) {
-                    Ok(c) => {
-                        *st_thread.lock().unwrap() = MountStatus::Mounted {
-                            label:      c.label.clone(),
-                            cipher:     c.cipher.to_string(),
-                            created_at: c.created_at,
-                            is_hidden:  c.is_hidden,
-                        };
-                        ctx.request_repaint();
-                        if let Err(e) = driver::mount(Arc::new(c), &mountpoint) {
-                            *st_thread.lock().unwrap() = MountStatus::Error(format!("FUSE: {e}"));
-                            ctx.request_repaint();
-                        } else {
-                            *st_thread.lock().unwrap() = MountStatus::Gone;
-                            ctx.request_repaint();
-                        }
-                    }
-                    Err(e) => {
-                        *st_thread.lock().unwrap() = MountStatus::Error(e.to_string());
-                        ctx.request_repaint();
-                    }
-                }
+                mount_thread(st_thread, vault_path, mountpoint, password, ctx);
             })
             .expect("failed to spawn mount thread");
-
-        #[cfg(not(target_family = "unix"))]
-        {
-            *status.lock().unwrap() = MountStatus::Error("FUSE is only supported on Linux / macOS.".into());
-        }
 
         let cipher_hint = read_cipher_from_bootstrap(&v.vault_path);
         self.recent.add(&v.vault_path, None, cipher_hint);
@@ -232,7 +257,24 @@ fn unmount_platform(mountpoint: &str) -> Result<(), String> {
             .and_then(|s| if s.success() { Ok(()) } else { Err(format!("umount: {s}")) })
     }
     #[cfg(target_os = "windows")]
-    { let _ = mountpoint; Err("Not implemented on Windows.".into()) }
+    {
+        // WinFSP provides a command-line tool to unmount: `net use <drive> /delete`
+        // or simply `winfsp.exe /unmount <mp>`. We try both.
+        let result = std::process::Command::new("net")
+            .args(["use", mountpoint, "/delete", "/y"])
+            .status();
+        match result {
+            Ok(s) if s.success() => Ok(()),
+            _ => {
+                // Fallback: try WinFSP's own utility
+                std::process::Command::new("winfsp.exe")
+                    .args(["/unmount", mountpoint])
+                    .status()
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| if s.success() { Ok(()) } else { Err(format!("winfsp unmount failed")) })
+            }
+        }
+    }
 }
 
 fn open_in_file_manager(path: &str) -> Result<String, String> {

@@ -168,7 +168,7 @@ impl VnmContainer {
                 kind: NodeKind::Directory,
                 entries: vec![],
             });
-            let payload = bincode::serialize(&root_dir)
+            let payload = rmp_serde::to_vec_named(&root_dir)
                 .map_err(|e| VnmError::Serialization(e.to_string()))?;
             hidden_store.write(hidden_start + 1, &payload)?;
             hidden_store.save_free_list()?;
@@ -219,7 +219,7 @@ impl VnmContainer {
             kind: NodeKind::Directory,
             entries: vec![],
         });
-        let payload = bincode::serialize(&root_dir)
+        let payload = rmp_serde::to_vec_named(&root_dir)
             .map_err(|e| VnmError::Serialization(e.to_string()))?;
         outer_store.write(1, &payload)?;
         outer_store.save_free_list()?;
@@ -323,20 +323,20 @@ impl VnmContainer {
 
     pub fn read_node(&self, slot: u64) -> Result<VaultNode> {
         let data = self.store.read(slot)?;
-        bincode::deserialize(&data)
+        rmp_serde::from_slice(&data)
             .map_err(|e| VnmError::Serialization(e.to_string()))
     }
 
     pub fn write_node(&self, node: &VaultNode) -> Result<u64> {
         let slot = self.store.alloc()?;
-        let payload = bincode::serialize(node)
+        let payload = rmp_serde::to_vec_named(node)
             .map_err(|e| VnmError::Serialization(e.to_string()))?;
         self.store.write(slot, &payload)?;
         Ok(slot)
     }
 
     pub fn update_node(&self, slot: u64, node: &VaultNode) -> Result<()> {
-        let payload = bincode::serialize(node)
+        let payload = rmp_serde::to_vec_named(node)
             .map_err(|e| VnmError::Serialization(e.to_string()))?;
         self.store.write(slot, &payload)
     }

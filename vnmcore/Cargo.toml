@@ -2,33 +2,38 @@
 name = "vnmcore"
 version.workspace = true
 edition.workspace = true
-description = "Core library for Venom cryptographic containers (CryFS-style)"
+description = "Core library for Venom cryptographic containers"
 
 [features]
 default = ["fuse"]
-fuse = ["dep:fuser", "dep:libc"]
+fuse    = ["dep:fuser", "dep:libc"]
 
 [dependencies]
-aes-gcm = { workspace = true }
-chacha20poly1305 = { workspace = true }
-argon2 = { workspace = true }
-rand = { workspace = true }
-rand_core = { workspace = true }
-zeroize = { workspace = true }
-subtle = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-bincode = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
-uuid = { workspace = true }
-hex = { workspace = true }
-sha2 = { workspace = true }
-hmac = { workspace = true }
+aes-gcm           = { workspace = true }
+chacha20poly1305  = { workspace = true }
+argon2            = { workspace = true }
+rand              = { workspace = true }
+rand_core         = { workspace = true }
+zeroize           = { workspace = true }
+subtle            = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+rmp-serde         = { workspace = true }
+thiserror         = { workspace = true }
+anyhow            = { workspace = true }
+hex               = { workspace = true }
+sha2              = { workspace = true }
+hmac              = { workspace = true }
+serde_bytes       = { workspace = true }
 
-serde_bytes = { workspace = true }
+# Unix: FUSE
 fuser = { workspace = true, optional = true }
-libc = { version = "0.2", optional = true }
+libc  = { version = "0.2", optional = true }
+
+# Windows: WinFSP
+[target.'cfg(target_os = "windows")'.dependencies]
+winfsp     = "0.13"
+widestring = "1"
 
 [[example]]
 name = "mount_test"
