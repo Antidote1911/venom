@@ -1,6 +1,6 @@
 # Venom — Project Status
 
-> Last updated: 2026-06-02
+> Last updated: 2026-06-02 (passphrase protection for .key files)
 
 ## What is Venom?
 
@@ -22,7 +22,7 @@ venom/
 │   │   │                hybrid_kem (X25519 + ML-KEM-1024), key file format
 │   │   ├── storage/     SlotStore, VaultNode, DirectoryBlock, FileBlock
 │   │   └── fs/          VnmContainer API, FUSE (Unix), WinFSP (Windows)
-│   ├── tests/           27 integration tests
+│   ├── tests/           28 integration tests
 │   └── examples/        mount_test — diagnostic CLI tool
 └── venom/        GUI application (egui 0.28 / eframe)
     └── src/
@@ -119,12 +119,32 @@ If ML-KEM-1024 has a classical weakness → X25519 still holds.
 
 ### Hybrid key file format
 
-**`.key`** — complete keypair, 1 784 bytes (keep secret, `chmod 600`):
+**`.key`** — complete keypair (two variants, distinguished by `protected` byte):
+
+*Unprotected* (1 785 bytes — relies on `chmod 600`):
 ```
 b"VKEY" + version u32 + created_at u64 + label[64] + fingerprint[8]
-        + x25519_sk[32] + x25519_pk[32]    ← X25519 keypair
-        + mlkem_seed[64] + mlkem_ek[1568]  ← ML-KEM-1024 keypair
+        + x25519_pk[32] + mlkem_ek[1568]   ← PUBLIC, always in plaintext
+        + protected=0
+        + x25519_sk[32] + mlkem_seed[64]   ← private, plaintext
 ```
+
+*Passphrase-protected* (1 886 bytes — private scalars encrypted):
+```
+b"VKEY" + version + created_at + label + fingerprint
+        + x25519_pk[32] + mlkem_ek[1568]   ← PUBLIC, always in plaintext
+        + protected=1
+        + argon2_salt[64] + kdf_profile[1]
+        + encrypt_block(                    ← private, ChaCha20-Poly1305 AEAD
+            Argon2id(passphrase, salt),
+            aad = "vnm:key:protect:v1",
+            x25519_sk[32] || mlkem_seed[64]
+          ) = 132 bytes
+```
+
+**Design principle**: public portions (`x25519_pk`, `mlkem_ek`) are **always in
+plaintext** regardless of protection — recipient management and fingerprint display
+work without a passphrase. Only private scalars are encrypted.
 
 **`.pub`** — public portion only, 1 688 bytes (safe to share freely):
 ```
@@ -132,8 +152,7 @@ b"VPUB" + version u32 + created_at u64 + label[64] + fingerprint[8]
         + x25519_pk[32] + mlkem_ek[1568]
 ```
 
-The `.pub` is exported on demand from the Key Manager. Anyone with a `.pub`
-can add you as a recipient on any container without needing your private key.
+The `.pub` is exported on demand from the Key Manager.
 
 ### Local key store (`~/.config/venom/keys/`)
 
@@ -141,12 +160,16 @@ Files: `<fingerprint_hex>.key` (private+public bundle)
 
 | Method | Action |
 |---|---|
-| `generate(label)` | Creates X25519 + ML-KEM-1024 independently, saves `.key` |
+| `generate(label)` | Creates X25519 + ML-KEM-1024 independently, saves unprotected `.key` |
+| `generate_protected(label, passphrase, profile)` | Same, with passphrase protection |
 | `import_key(path)` | Imports a `.key` file from backup or another machine |
 | `export_pub(fp, dest)` | Writes the `.pub` file for sharing |
+| `protect(fp, old_pw, new_pw, profile)` | Add or change passphrase on existing key |
+| `unprotect(fp, passphrase)` | Remove passphrase protection |
 | `remove(fp)` | Deletes the `.key` file |
-| `get_key(fp)` | Returns `HybridPrivateKey` for `OpenCredential::PrivateKey` |
-| `get_public(fp)` | Returns `HybridPublicKey` for `add_key_recipient` |
+| `get_key(fp)` | Returns private key (fails if passphrase-protected) |
+| `get_key_with_passphrase(fp, pw)` | Decrypts and returns private key |
+| `get_public(fp)` | Returns public key (always works, no passphrase needed) |
 
 ### VnmContainer API
 
@@ -178,7 +201,7 @@ container.read_node / write_node / update_node / free_node / flush
 | Suite | Count | Covers |
 |-------|------:|--------|
 | `crypto_tests` | 8 | ChaCha20/AES AEAD, wrong key, AAD binding, tamper, KDF |
-| `container_tests` | 10 | create/open (both ciphers), wrong password, CRUD, persistence, hidden volume, **hybrid KEM round-trip**, **add hybrid recipient + open with private key**, **multiple recipients** |
+| `container_tests` | 11 | create/open (both ciphers), wrong password, CRUD, persistence, hidden volume, hybrid KEM round-trip, add hybrid recipient + open with private key, multiple recipients, **key file passphrase protect/unprotect round-trip, wrong passphrase rejected, public readable without passphrase** |
 | `fuse_cache_tests` (inline) | 9 | cache lifecycle + large-file linked-list (75 KB) |
 
 ### GUI (egui 0.28)
@@ -186,16 +209,17 @@ container.read_node / write_node / update_node / free_node / flush
 #### Key Manager (`Screen::KeyManager`)
 - [x] **🗝 Keys** button in topbar with keypair-count badge (purple)
 - [x] **Key list** — each entry as a card:
-  - Blue border + `🔑` icon for own keypairs
+  - `🔒🔑` (passphrase-protected, green badge) or `🔑` (unprotected, orange badge)
   - Label, fingerprint `ab:cd:ef:01:23:45:67:89` (purple monospace), creation date
-  - `[📤 Export .pub]` — opens save dialog → produces `.pub` file to share
+  - `[📤 Export .pub]` — save dialog → `.pub` file to share
+  - `[▼ Passphrase]` toggle — reveals the passphrase management panel
   - `[Delete]` — removes the `.key` file
-- [x] **Generate panel** — label field + `⚡ Generate keypair`:
-  - Creates X25519 and ML-KEM-1024 independently
-  - Saves as `<fingerprint>.key` (`chmod 600`)
-  - Displays fingerprint and info on success
-- [x] **Import panel** — `[📥 Import .key file]` — import from backup
-- [x] Header explains the hybrid approach and independence of keys
+- [x] **Passphrase management panel** (per selected key):
+  - Unprotected key: new passphrase + confirm + KDF profile + `🔒 Add passphrase protection`
+  - Protected key: current passphrase field + `🔓 Remove protection`
+- [x] **Generate panel** — label field + optional passphrase (checkbox → fields + profile)
+  + `⚡ Generate keypair`
+- [x] **Import panel** — `[📥 Import .key file]` — copies to store, reads metadata without passphrase
 
 #### Recipients screen (`Screen::Recipients`)
 - [x] Lists current password and hybrid key slots per mounted container
@@ -216,9 +240,6 @@ container.read_node / write_node / update_node / free_node / flush
 
 ### Security
 
-- [ ] **Private key passphrase protection** — `.key` files currently stored unencrypted
-  (protected by `chmod 600`). Adding Argon2id+AES-GCM encryption for the private
-  portion is the next security priority.
 - [ ] **Recipient management requires password re-entry** — `K_master` is not kept
   in mount state; adding/removing recipients requires re-opening the container.
 - [ ] **Write atomicity** — crash during slot replacement can corrupt a file.
@@ -268,7 +289,8 @@ container.read_node / write_node / update_node / free_node / flush
    `find <mp> -name '.goutputstream-*' -delete`.
 7. **Outer safe-fill unenforced** — no GUI guard against overwriting hidden volume data.
 8. **WinFSP untested on real hardware** — driver compiles, no live session validated.
-9. **Private keys stored unencrypted** — `.key` files rely on `chmod 600` only.
-   Passphrase protection is the next planned security feature.
+9. **Unprotected `.key` files rely on filesystem permissions** — if no passphrase is
+   set, `chmod 600` is the only protection. Use the Key Manager to add passphrase
+   protection for any key that may be stored on a shared or backed-up volume.
 10. **Recipient management requires re-open** — `K_master` not kept in mount state;
     adding/removing recipients requires entering the password again.
