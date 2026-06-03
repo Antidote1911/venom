@@ -1,133 +1,106 @@
-# Security Comparison: VeraCrypt vs Venom
+# Security Policy
 
-> Analysis date: 2026-06-02
+## Reporting a Vulnerability
 
----
+**Do not open a public GitHub issue for security vulnerabilities.**
 
-## 1. Per-sector / per-slot integrity
+Send a private report to: **libertykondracki28@outlook.com**
 
-| | VeraCrypt | Venom |
-|---|---|---|
-| Mode | **XTS-AES** | **AES-256-GCM or ChaCha20-Poly1305 (AEAD)** |
-| Authentication | ✗ None — XTS has no integrity | ✓ 128-bit tag per slot |
-| Bit-flip detection | ✗ Silent corruption | ✓ Detected, decryption fails |
-| Sector/slot replay | ✗ Any sector can be substituted | ✓ Slot index as AAD prevents swap |
-| Nonce | ✗ Deterministic (sector number) — same plaintext → same ciphertext | ✓ Random 96-bit nonce per write |
+Please include:
+- A description of the vulnerability and its impact
+- Steps to reproduce or a proof-of-concept
+- The affected component (`vnmcore`, `vnmcore-ffi`, `venom` Qt frontend)
 
-**Venom wins.** XTS was designed for raw disk access where integrity comes from the OS filesystem layer. In a FUSE container without an OS-level filesystem, per-slot authentication is the correct approach.
+You will receive an acknowledgement within **72 hours** and a status update
+within **7 days**. We will coordinate a fix and disclosure timeline with you.
 
 ---
 
-## 2. Key derivation
+## Supported Versions
 
-| | VeraCrypt | Venom Interactive | Venom Sensitive |
-|---|---|---|---|
-| Algorithm | PBKDF2-SHA512 | **Argon2id** | **Argon2id** |
-| CPU cost | 500 000 iterations | 3 passes | 4 passes |
-| Memory cost | — | **64 MiB** | **256 MiB** |
-| GPU / ASIC resistance | ✗ CPU-bound only | ✓ Memory-hard | ✓ Memory-hard |
-| Standard | PKCS#5 | **RFC 9106 (PHC winner)** | **RFC 9106** |
+| Version | Supported |
+|---------|-----------|
+| `master` (latest) | ✓ |
+| Older commits | ✗ |
 
-**Venom wins.** Argon2id is memory-hard: an attacker needs N MiB of RAM *per password guess*, making GPU farms and ASICs impractical. A dedicated attacker with 1000 GPUs, each with 80 GB VRAM, can test only ~312 guesses/second against Venom Sensitive vs millions/second against VeraCrypt.
+Venom has not yet reached a stable release. All security fixes are applied
+to `master`. There are no backport branches.
 
 ---
 
-## 3. Deleted file security (forward secrecy)
+## Security Properties
 
-| | VeraCrypt | Venom |
-|---|---|---|
-| File delete | Marks sector as free, does **not** wipe ciphertext | **Immediately overwrites freed slot with random bytes** |
-| Forensic recovery | Possible — encrypted data of deleted files remains on disk | Not possible — slot is unrecoverably wiped |
+### Encryption
 
-**Venom wins.** Freed slots are wiped in `SlotStore::wipe()` before being returned to the free list.
+| Property | Value |
+|----------|-------|
+| Ciphers | AES-256-GCM, ChaCha20-Poly1305 (AEAD) |
+| Integrity | 128-bit AEAD tag per slot |
+| Nonce | Random 96-bit per write (no deterministic IV) |
+| AAD | `slot_index as u64 LE` — binds ciphertext to physical location |
 
----
+Every slot is independently authenticated. Bit-flip attacks and slot-swap
+attacks are detected before decryption completes.
 
-## 4. Nonce / IV freshness
+### Key Derivation
 
-| | VeraCrypt | Venom |
-|---|---|---|
-| Per-write nonce | ✗ Deterministic (sector # as XTS tweak) | ✓ Random 96-bit nonce |
-| Traffic analysis | ✗ Unchanged sectors produce identical ciphertext | ✓ Every write looks different, even for same data |
-| Rollback detection | ✗ Not possible | ✓ Different nonce → different ciphertext |
+| Profile | Algorithm | Memory | Iterations | Parallelism |
+|---------|-----------|-------:|----------:|------------:|
+| `interactive` | Argon2id (RFC 9106) | 64 MiB | 3 | 4 |
+| `sensitive`   | Argon2id (RFC 9106) | 256 MiB | 4 | 4 |
 
-**Venom wins.**
+Argon2id is memory-hard: GPU farms and ASICs are impractical at these
+parameters. The KDF profile is stored as a 1-byte id (0 or 1) — exact
+parameters are not exposed.
 
----
+### Recipient Model
 
-## 5. Salt size
+- **Password slots** (max 8): `Argon2id(password, salt) → AEAD(K_master)`
+- **Hybrid key slots** (max 8): `X25519 + ML-KEM-1024 → AEAD(K_master)`
+  - Recipient identity is **not exposed** — no plaintext fingerprint in
+    slots; all slots are tried blindly on open (recipient anonymity).
+  - Post-quantum security: resistant to Shor's algorithm as long as
+    ML-KEM-1024 holds; falls back to X25519 security if ML-KEM is broken.
 
-| | VeraCrypt | Venom (before fix) | Venom (after fix) |
-|---|---|---|---|
-| Salt | **64 bytes (512 bits)** | 32 bytes | **64 bytes** |
+### Plausible Deniability
 
-Both are technically sufficient for security. Matching VeraCrypt's 64-byte salt is best practice and eliminates this gap.
+- The entire file is filled with cryptographically random bytes at creation.
+- Unused recipient slots are indistinguishable from active slots.
+- **Hidden volumes**: a second encrypted volume lives at the end of the file.
+  Its header is encrypted with a key derived directly from the hidden
+  password — no structural marker distinguishes it from random bytes.
+- The outer header claims full container capacity; no field reveals the
+  existence or size of a hidden volume.
 
----
+### Forward Secrecy
 
-## 6. KDF parameters exposure
-
-| | VeraCrypt | Venom (before fix) | Venom (after fix) |
-|---|---|---|---|
-| Algorithm in plaintext | Partially (must try all ~4 KDFs) | ✗ cipher_id, memory, iterations, parallelism all exposed | cipher_id + 1-byte profile ID |
-| Attacker knowledge | Must try multiple KDF combos | Knows exact Argon2id params to use | Knows "interactive" or "sensitive" |
-
-**Before fix**: exposing exact Argon2id parameters helps an attacker size their hardware for a brute-force attack. **After fix**: they know the profile class but not exact parameters — a minor but real improvement.
-
----
-
-## 7. Hidden volume deniability
-
-| | VeraCrypt | Venom (before fix) | Venom (after fix) |
-|---|---|---|---|
-| Outer header reveals inner boundary | ✗ | ✗ `outer_limit` field exposes slot boundary | ✓ Outer claims full capacity |
-| Hidden header location | End of file (last 512 B of data area) | **Fixed offset 512** — obvious to attacker | **End of file** (last 512 B) |
-| Can attacker prove hidden volume? | Not without password | ✗ `outer_limit < total_slots` is proof | ✓ Not without password |
-
-**Critical fix implemented.** Before the fix, an attacker who knows the Venom format can open a `.vnm` file with any password, read the outer header, compare `outer_limit` to file size, and immediately determine a hidden volume exists. After the fix, the outer header claims ownership of the full container, and the hidden header lives at the end of the file indistinguishable from random bytes.
+Freed data slots are immediately overwritten with random bytes before being
+returned to the free list. Deleted files leave no recoverable ciphertext.
 
 ---
 
-## 8. Header backup / redundancy
+## Known Limitations
 
-| | VeraCrypt | Venom |
-|---|---|---|
-| Backup header | ✓ Backup copy at different offset | ✗ Single header — corruption = data loss |
-
-**VeraCrypt wins.** Header backup is in the TODO list for Venom.
-
----
-
-## 9. Cipher range
-
-| | VeraCrypt | Venom |
-|---|---|---|
-| Ciphers | AES-256, Serpent-256, Twofish-256, and cascades | AES-256-GCM, ChaCha20-Poly1305 |
-| Cascades | ✓ (AES-Twofish, AES-Twofish-Serpent…) | ✗ |
-
-VeraCrypt offers cipher cascades for defense-in-depth. Venom's ciphers are modern AEAD constructions that provide both confidentiality and integrity — a different trade-off. Cascades add cost without proven benefit when the base cipher is unbroken.
+| Limitation | Impact |
+|------------|--------|
+| No header backup | A single corrupted header means total data loss. VeraCrypt keeps a redundant copy. |
+| Hidden volume: single password only | The hidden volume does not support ML-KEM key recipients or multiple passwords. |
+| No `fsck` tool | Orphaned slots (from a crash during write-through) are not reclaimed automatically. |
+| Custom filesystem format | A forensic examiner with the key can identify the Venom VaultNode format. Standard filesystems (FAT, ext4) inside the container would offer stronger format deniability. |
+| Chunk 0 not written until `close()` | A crash before `close()` may leave write-through chunks on disk that are not referenced in the head slot index. |
 
 ---
 
-## Summary
+## Cryptographic Dependencies
 
-| Property | VeraCrypt | Venom (before) | Venom (after) |
-|---|:---:|:---:|:---:|
-| Per-slot integrity (AEAD) | ✗ | ✓ | ✓ |
-| Argon2id KDF (memory-hard) | ✗ | ✓ | ✓ |
-| Deleted file wipe | ✗ | ✓ | ✓ |
-| Random nonce per write | ✗ | ✓ | ✓ |
-| 64-byte salt | ✓ | ✗ | ✓ |
-| KDF params hidden | ~ | ✗ | ~ |
-| Hidden volume deniability | ✓ | ✗ | ✓ |
-| Header backup | ✓ | ✗ | ✗ (TODO) |
+| Crate | Algorithm | Version policy |
+|-------|-----------|---------------|
+| `aes-gcm` | AES-256-GCM | RustCrypto, kept up to date |
+| `chacha20poly1305` | ChaCha20-Poly1305 | RustCrypto, kept up to date |
+| `ml-kem` | ML-KEM-1024 (FIPS 203) | RustCrypto, kept up to date |
+| `x25519-dalek` | X25519 ECDH | kept up to date |
+| `argon2` | Argon2id (RFC 9106) | RustCrypto, kept up to date |
+| `sha2` | SHA-256 | RustCrypto, kept up to date |
 
-**Venom after fixes provides equal or stronger security than VeraCrypt on every property except header backup.**
-
----
-
-## Remaining gaps vs VeraCrypt
-
-1. **Header backup** — a single corrupted header means total data loss. VeraCrypt keeps a backup copy.
-2. **Cipher cascades** — Venom supports one cipher per volume, not multi-cipher cascades.
-3. **No deniable OS filesystem** — VeraCrypt supports standard filesystems (FAT, ext4) inside the container, providing stronger OS-level deniability (the forensic examiner sees an ext4, not a custom format). Venom uses a custom VaultNode format, which could be identified by a format-aware examiner if they have the key.
+Dependencies are reviewed on each update. `cargo audit` is recommended
+before any release build.
