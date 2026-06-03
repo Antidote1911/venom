@@ -7,12 +7,15 @@
 //!   [33..101] VNMB encrypted K_master (68 bytes)
 //!             AAD: b"vnm:pw:v1"
 //!
-//! ## Hybrid key slot (1676 bytes) — X25519 + ML-KEM-1024
+//! ## Hybrid key slot (1668 bytes) — X25519 + ML-KEM-1024
 //!
-//!   [0..8]      fingerprint [u8; 8]        — SHA-256(x25519_pk || mlkem_ek)[0..8]
-//!   [8..40]     x25519_eph_pk [u8; 32]     — ephemeral X25519 public key
-//!   [40..1608]  mlkem_ct [u8; 1568]        — ML-KEM-1024 ciphertext
-//!   [1608..1676] VNMB encrypted K_master   — AEAD(hybrid_key, K_master, 68 bytes)
+//! No plaintext fingerprint is stored: all slots are tried blindly on open.
+//! This preserves recipient anonymity — an attacker with the container and a
+//! list of candidate public keys cannot determine who the file is encrypted for.
+//!
+//!   [0..32]     x25519_eph_pk [u8; 32]     — ephemeral X25519 public key
+//!   [32..1600]  mlkem_ct [u8; 1568]        — ML-KEM-1024 ciphertext
+//!   [1600..1668] VNMB encrypted K_master   — AEAD(hybrid_key, K_master, 68 bytes)
 //!               AAD: b"vnm:key:v1"
 
 use crate::Result;
@@ -24,8 +27,8 @@ use crate::crypto::kem::CT_SIZE;
 
 const VNMB_ENCRYPTED_32: usize = 68;
 
-pub const PW_SLOT_SIZE:  usize = 32 + 1 + VNMB_ENCRYPTED_32;                        // 101
-pub const KEY_SLOT_SIZE: usize = 8 + X25519_PK_SIZE + CT_SIZE + VNMB_ENCRYPTED_32;  // 1676
+pub const PW_SLOT_SIZE:  usize = 32 + 1 + VNMB_ENCRYPTED_32;               // 101
+pub const KEY_SLOT_SIZE: usize = X25519_PK_SIZE + CT_SIZE + VNMB_ENCRYPTED_32; // 1668
 
 const AAD_PW:  &[u8] = b"vnm:pw:v1";
 const AAD_KEY: &[u8] = b"vnm:key:v1";
@@ -68,12 +71,11 @@ pub fn encode_key_slot(
     k_master: &[u8; 32], recipient: &HybridPublicKey, cipher: CipherAlgorithm,
 ) -> Result<[u8; KEY_SLOT_SIZE]> {
     let mut buf = [0u8; KEY_SLOT_SIZE];
-    buf[0..8].copy_from_slice(&recipient.fingerprint());
     let ct = encapsulate(recipient)?;
-    buf[8..40].copy_from_slice(&ct.x25519_eph_pk);
-    buf[40..40 + CT_SIZE].copy_from_slice(&ct.mlkem_ct);
+    buf[0..X25519_PK_SIZE].copy_from_slice(&ct.x25519_eph_pk);
+    buf[X25519_PK_SIZE..X25519_PK_SIZE + CT_SIZE].copy_from_slice(&ct.mlkem_ct);
     let enc = encrypt_block(&ct.shared_secret, cipher, AAD_KEY, k_master)?;
-    let enc_start = 8 + X25519_PK_SIZE + CT_SIZE;
+    let enc_start = X25519_PK_SIZE + CT_SIZE;
     buf[enc_start..enc_start + enc.len()].copy_from_slice(&enc);
     Ok(buf)
 }
@@ -81,15 +83,9 @@ pub fn encode_key_slot(
 pub fn try_key_slot(
     slot: &[u8; KEY_SLOT_SIZE], private: &HybridPrivateKey, cipher: CipherAlgorithm,
 ) -> Option<[u8; 32]> {
-    // Fingerprint check before crypto
-    if &slot[0..8] != private.fingerprint().as_ref() { return None; }
-    let x25519_eph_pk: &[u8; X25519_PK_SIZE] = slot[8..8 + X25519_PK_SIZE].try_into().ok()?;
-    let mlkem_ct:      &[u8; CT_SIZE]         = slot[8 + X25519_PK_SIZE..8 + X25519_PK_SIZE + CT_SIZE].try_into().ok()?;
-    let enc                                    = &slot[8 + X25519_PK_SIZE + CT_SIZE..];
+    let x25519_eph_pk: &[u8; X25519_PK_SIZE] = slot[0..X25519_PK_SIZE].try_into().ok()?;
+    let mlkem_ct:      &[u8; CT_SIZE]         = slot[X25519_PK_SIZE..X25519_PK_SIZE + CT_SIZE].try_into().ok()?;
+    let enc                                    = &slot[X25519_PK_SIZE + CT_SIZE..];
     let shared = decapsulate(private, x25519_eph_pk, mlkem_ct).ok()?;
     decrypt_block(&shared, cipher, AAD_KEY, enc).ok()?.try_into().ok()
-}
-
-pub fn read_slot_fingerprint(slot: &[u8; KEY_SLOT_SIZE]) -> [u8; 8] {
-    slot[0..8].try_into().unwrap()
 }

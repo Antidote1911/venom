@@ -9,7 +9,6 @@ pub use header::{
 pub use recipient::{
     encode_password_slot, try_password_slot,
     encode_key_slot, try_key_slot,
-    read_slot_fingerprint,
 };
 
 use serde::{Deserialize, Serialize};

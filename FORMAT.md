@@ -29,13 +29,13 @@ Constantes :
 | `MAX_PASSWORD_SLOTS`   |       8 | fixe                                          |
 | `MAX_KEY_SLOTS`        |       8 | fixe                                          |
 | `PW_SLOT_SIZE`         |     101 | 32 + 1 + 68                                   |
-| `KEY_SLOT_SIZE`        |   1 676 | 8 + 32 + 1 568 + 68                           |
-| `RECIPIENT_AREA_SIZE`  |  14 216 | 8 × 101 + 8 × 1 676                           |
-| `DATA_AREA_OFFSET`     |  15 240 | 1 024 + 14 216                                |
+| `KEY_SLOT_SIZE`        |   1 668 | 32 + 1 568 + 68                               |
+| `RECIPIENT_AREA_SIZE`  |  14 152 | 8 × 101 + 8 × 1 668                           |
+| `DATA_AREA_OFFSET`     |  15 176 | 1 024 + 14 152                                |
 | `SLOT_SIZE`            |  32 768 | fixe                                          |
 
 Taille minimale d'un fichier conteneur :
-`DATA_AREA_OFFSET + 16 × SLOT_SIZE + 512 = 15 240 + 524 288 + 512 = 540 040 octets`
+`DATA_AREA_OFFSET + 16 × SLOT_SIZE + 512 = 15 176 + 524 288 + 512 = 539 976 octets`
 
 ---
 
@@ -134,9 +134,9 @@ Disposition fixe, jamais réallouée :
 Offset                  Taille          Description
 ──────────────────────────────────────────────────────────────────────────
 1 024                   8 × 101 = 808   8 password slots (voir §3.1)
-1 024 + 808 = 1 832     8 × 1 676 = 13 408   8 hybrid key slots (voir §3.2)
+1 024 + 808 = 1 832     8 × 1 668 = 13 344   8 hybrid key slots (voir §3.2)
 ──────────────────────────────────────────────────────────────────────────
-Total                   14 216 octets
+Total                   14 152 octets
 ```
 
 Les slots inutilisés contiennent des octets aléatoires
@@ -161,17 +161,21 @@ slot_key = Argon2id(password, salt=slot[0..32], profile=slot[32])
 K_master = AEAD_decrypt(slot_key, slot[33..101], aad=b"vnm:pw:v1")
 ```
 
-### 3.2 Hybrid key slot (1 676 octets)
+### 3.2 Hybrid key slot (1 668 octets)
 
 Chaque slot chiffre `K_master` avec une clé hybride X25519 + ML-KEM-1024.
+
+Aucun fingerprint n'est stocké en clair : tous les slots sont testés à
+l'aveugle à l'ouverture. Cela préserve **l'anonymat des destinataires** —
+un adversaire possédant le conteneur et une liste de clés publiques suspectes
+ne peut pas déterminer à qui le fichier est destiné.
 
 ```
 Offset  Taille  Type        Description
 ──────────────────────────────────────────────────────────────────────────
-0        8      [u8; 8]     fingerprint = SHA-256(x25519_pk ‖ mlkem_ek)[0..8]
-8       32      [u8; 32]    x25519_eph_pk — clé publique éphémère X25519
-40    1 568      [u8; 1568]  mlkem_ct — chiffré ML-KEM-1024
-1 608   68      VNMB block  K_master chiffré (32 octets en clair → 68 octets)
+0       32      [u8; 32]    x25519_eph_pk — clé publique éphémère X25519
+32    1 568      [u8; 1568]  mlkem_ct — chiffré ML-KEM-1024
+1 600   68      VNMB block  K_master chiffré (32 octets en clair → 68 octets)
 ──────────────────────────────────────────────────────────────────────────
 ```
 
@@ -186,7 +190,7 @@ hybrid_key    = SHA-256(
     ‖ x25519_eph_pk    (32 B)
     ‖ mlkem_ct         (1568 B)
 )
-K_master = AEAD_decrypt(hybrid_key, slot[1608..1676], aad=b"vnm:key:v1")
+K_master = AEAD_decrypt(hybrid_key, slot[1600..1668], aad=b"vnm:key:v1")
 ```
 
 ---
@@ -415,13 +419,16 @@ hybrid_key = SHA-256(
 Sécurité : le conteneur reste sécurisé si **l'un des deux** algorithmes
 tient (X25519 contre l'attaquant classique, ML-KEM-1024 contre le quantique).
 
-### 7.4 Fingerprint
+### 7.4 Fingerprint (fichiers de clés uniquement)
 
 ```
 fingerprint[8] = SHA-256(x25519_pk ‖ mlkem_ek)[0..8]
 ```
 
-Utilisé pour identifier rapidement le bon slot destinataire sans tenter le déchiffrement.
+Le fingerprint est stocké dans les fichiers `.key` et `.pub` pour l'interface
+utilisateur (identification d'une clé dans le gestionnaire). Il n'est **pas**
+présent dans les slots destinataires du conteneur — les slots sont testés à
+l'aveugle pour préserver l'anonymat des destinataires.
 
 ---
 

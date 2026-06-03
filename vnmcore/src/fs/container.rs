@@ -27,10 +27,10 @@ use crate::{Result, VnmError};
 use crate::container::{
     CipherAlgorithm,
     HEADER_REGION_SIZE, SLOT_SIZE, DATA_AREA_OFFSET,
-    MAX_PASSWORD_SLOTS, MAX_KEY_SLOTS, PW_SLOT_SIZE, KEY_SLOT_SIZE,     encode_header, decode_header, read_header_plaintext, kdf_params_for_profile,
+    MAX_PASSWORD_SLOTS, MAX_KEY_SLOTS, PW_SLOT_SIZE, KEY_SLOT_SIZE,
+    encode_header, decode_header, read_header_plaintext, kdf_params_for_profile,
     encode_password_slot, try_password_slot,
     encode_key_slot, try_key_slot,
-    read_slot_fingerprint,
 };
 use crate::crypto::hybrid_kem::{HybridPublicKey, HybridPrivateKey};
 use crate::storage::{SlotStore, VaultNode, NodeKind};
@@ -61,9 +61,8 @@ pub enum OpenCredential<'a> {
 
 /// Summary of one recipient slot (for display in the GUI).
 pub struct RecipientInfo {
-    pub is_key:      bool,
-    pub fingerprint: [u8; 8], // ML-KEM EK fingerprint (key slots) or zero (password slots)
-    pub slot_index:  usize,
+    pub is_key:     bool,
+    pub slot_index: usize,
 }
 
 /// A mounted Venom container.
@@ -344,14 +343,11 @@ impl VnmContainer {
         let raw = read_512_at(&self.path, 0)?;
         let (_, _, n_pw, n_key) = read_header_plaintext(&raw);
         let mut out = vec![];
-
         for i in 0..n_pw as usize {
-            out.push(RecipientInfo { is_key: false, fingerprint: [0; 8], slot_index: i });
+            out.push(RecipientInfo { is_key: false, slot_index: i });
         }
         for j in 0..n_key as usize {
-            let slot = read_key_slot_raw(&self.path, j)?;
-            let fp = read_slot_fingerprint(&slot);
-            out.push(RecipientInfo { is_key: true, fingerprint: fp, slot_index: j });
+            out.push(RecipientInfo { is_key: true, slot_index: j });
         }
         Ok(out)
     }
@@ -382,26 +378,28 @@ impl VnmContainer {
         Ok(())
     }
 
-    /// Remove an ML-KEM recipient by fingerprint.
-    pub fn remove_key_recipient(&self, fingerprint: &[u8; 8]) -> Result<()> {
+    /// Remove the ML-KEM key slot at the given index.
+    ///
+    /// The caller must provide `slot_index` from `list_recipients()`.
+    /// Remaining slots are compacted (shifted down) and the freed slot is wiped.
+    pub fn remove_key_recipient(&self, slot_index: usize) -> Result<()> {
         let raw = read_512_at(&self.path, 0)?;
         let (cipher, _, n_pw, n_key) = read_header_plaintext(&raw);
+
+        if slot_index >= n_key as usize {
+            return Err(VnmError::InvalidFormat("key slot index out of range".into()));
+        }
 
         let mut slots: Vec<[u8; KEY_SLOT_SIZE]> = (0..n_key as usize)
             .map(|i| read_key_slot_raw(&self.path, i))
             .collect::<Result<_>>()?;
 
-        let before = slots.len();
-        slots.retain(|s| read_slot_fingerprint(s) != *fingerprint);
-        if slots.len() == before {
-            return Err(VnmError::InvalidFormat("recipient not found".into()));
-        }
+        slots.remove(slot_index);
 
-        // Rewrite all key slots
         for (i, s) in slots.iter().enumerate() {
             write_key_slot_raw(&self.path, i, s)?;
         }
-        // Wipe the last slot (now unused) with random bytes
+        // Wipe the now-unused last slot with random bytes
         let mut rng = rand::thread_rng();
         let mut random_slot = vec![0u8; KEY_SLOT_SIZE];
         rng.fill_bytes(&mut random_slot);
