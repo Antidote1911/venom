@@ -11,19 +11,28 @@ d'octets aléatoires cryptographiquement sûrs (deniabilité plausible).
 
 ```
 Offset          Taille          Description
-─────────────────────────────────────────────────────────────────────────────
-0               512             En-tête extérieur — primaire (chiffré)
-512             512             En-tête extérieur — backup (copie identique)
+────────────────────────────────────────────────────────────────────────────────
+0               512             En-tête extérieur — primaire
+512             512             En-tête caché — backup¹  (ou aléatoire si pas de volume caché)
 1 024           14 152          Zone destinataires (password slots + key slots)
-15 176          N × 32 768      Zone de données (N slots de 32 768 octets)
-EOF − 1 024     512             En-tête caché — backup  (si volume caché, sinon aléatoire)
-EOF − 512       512             En-tête caché — primaire (si volume caché, sinon aléatoire)
-─────────────────────────────────────────────────────────────────────────────
+15 176          N × 32 768      Zone de données
+EOF − 1 024     512             En-tête extérieur — backup¹  (ou aléatoire si pas de volume caché)
+EOF − 512       512             En-tête caché — primaire¹  (ou aléatoire si pas de volume caché)
+────────────────────────────────────────────────────────────────────────────────
+¹ Présent uniquement si un volume caché a été créé.
 ```
 
-**Taille de queue (tail) :**
-- Conteneur sans volume caché : 512 octets (placeholder aléatoire)
-- Conteneur avec volume caché : 1 024 octets (backup 512 + primaire 512)
+**Taille de queue (tail) et layout des backups :**
+
+| Type de conteneur | Tail | Backup extérieur | Backup caché |
+|-------------------|-----:|-----------------|--------------|
+| Extérieur seul    | 512 B | `EOF−512` | — |
+| Avec volume caché | 1 024 B | `EOF−1024` | `[512..1024]` |
+
+Le backup extérieur est placé à l'**extrémité opposée** du fichier par rapport au
+primaire, maximisant la séparation géographique sur le support physique.
+Une corruption localisée (secteur défectueux, tronquage accidentel du début ou
+de la fin) ne peut détruire les deux copies simultanément.
 
 Constantes :
 
@@ -521,7 +530,12 @@ l'aveugle pour préserver l'anonymat des destinataires.
           Si succès → aller en 1d
      d. Déchiffrer le bloc VNMB [68..500] avec K_master → valider magic b"VNM1"
 
-2. Si l'étape 1 échoue (header corrompu) → recommencer avec le backup [512..1024]
+2. Si l'étape 1 échoue :
+     - Ciphertext corrompu (plaintext intact) : K_master déjà connu, essayer
+       AEAD sur EOF-512 puis EOF-1024.
+     - Plaintext corrompu (n_pw=0) : lire n_pw depuis EOF-512 ou EOF-1024,
+       dériver K_master, essayer AEAD sur ces copies.
+     Note : Argon2id est exécuté une seule fois dans tous les cas.
 
 3. Si succès : accéder aux slots via DATA_AREA_OFFSET + slot_index × SLOT_SIZE
 ```
@@ -532,14 +546,15 @@ Pour le volume caché :
      K_hidden = Argon2id(password, salt=hdr[0..64], profile=hdr[65])
      Déchiffrer bloc VNMB → valider magic b"VNM1"
 
-2. Si échec → tenter le backup [EOF-1024..EOF-512]
+2. Si échec → tenter le backup [512..1024] (proche du début du fichier)
 
 3. Si succès : slots du volume caché = [hidden_start .. hidden_start + outer_slots)
 ```
 
-La procédure d'ouverture essaie toujours le primaire en premier ; le backup
-n'est utilisé qu'en cas d'échec d'authentification AEAD (corruption physique).
-Un mauvais mot de passe échoue sur les deux et retourne `AuthenticationFailed`.
+Garanties :
+- Argon2id exécuté **une seule fois** quelle que soit la situation (pas de surcoût pour les backups).
+- Mauvais mot de passe : échec immédiat, aucune copie supplémentaire essayée.
+- Corruption localisée (secteur défectueux en début ou fin de fichier) : récupération transparente.
 
 ---
 

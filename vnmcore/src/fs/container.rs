@@ -216,8 +216,8 @@ impl VnmContainer {
             // Use password-derived key for the hidden header.
 
             let hid_hdr = encode_header_with_password(&hid_payload, h.password, true, &k_hidden)?;
-            write_bytes_at(path, file_size - 512,  &hid_hdr)?; // primary
-            write_bytes_at(path, file_size - 1024, &hid_hdr)?; // backup
+            write_bytes_at(path, file_size - 512, &hid_hdr)?; // hidden primary  (EOF-512)
+            write_bytes_at(path, 512,             &hid_hdr)?; // hidden backup   ([512..1024], near start)
 
             // Init hidden slot store (hidden volume has its own alloc in its first slot)
             let hid_alloc = hid_start + hidden_slots - 1;
@@ -242,8 +242,12 @@ impl VnmContainer {
             root_slot: OUTER_ROOT_SLOT, created_at: now, label: lbl,
         };
         let outer_hdr = encode_header(&outer_payload, &k_outer, false)?;
-        write_bytes_at(path, 0,   &outer_hdr)?; // primary
-        write_bytes_at(path, 512, &outer_hdr)?; // backup
+        write_bytes_at(path, 0, &outer_hdr)?;   // outer primary  (offset 0)
+        // Outer backup at the far end of the file — maximum geographic separation.
+        // outer-only: EOF-512  (replaces random placeholder)
+        // with hidden: EOF-1024 (just before the hidden primary at EOF-512)
+        let outer_backup_off = if hidden.is_some() { file_size - 1024 } else { file_size - 512 };
+        write_bytes_at(path, outer_backup_off, &outer_hdr)?;
 
         // 4. Write password recipient slot (only when a password is provided)
         if has_password {
@@ -280,34 +284,66 @@ impl VnmContainer {
         if !path.exists() { return Err(VnmError::ContainerNotFound(path.display().to_string())); }
         let file_size = std::fs::metadata(path)?.len();
 
-        // Try outer volume: primary header at [0..512], then backup at [512..1024].
-        let outer = try_outer_at(path, 0, &credential)
-            .or_else(|| try_outer_at(path, 512, &credential));
+        // ── Outer volume ──────────────────────────────────────────────────────
+        //
+        // Derive K_master once (expensive: Argon2id or ML-KEM decapsulation).
+        // If the primary header's plaintext fields look corrupted (both counts
+        // zero), fall back to a backup header's plaintext before running KDF.
+        //
+        let raw_0 = read_512_at(path, 0).unwrap_or([0u8; 512]);
+        let (cipher0, _, n_pw0, n_key0) = read_header_plaintext(&raw_0);
 
-        if let Some((k, meta)) = outer {
-            let store = open_store(path, k, meta.cipher, 0, meta.outer_slots, OUTER_ALLOC_SLOT)?;
-            store.load_free_list()?;
-            return Ok(VnmContainer {
-                root_slot:   meta.root_slot,
-                is_hidden:   false,
-                cipher:      meta.cipher,
-                outer_slots: meta.outer_slots,
-                outer_limit: meta.outer_slots,
-                label:       label_from(meta.label),
-                created_at:  meta.created_at,
-                k_master:    k,
-                store,
-                path:        path.to_path_buf(),
-            });
+        let (cipher, n_pw, n_key) = if n_pw0 == 0 && n_key0 == 0 {
+            // Primary plaintext zeroed — try backup locations for valid counts
+            [file_size.saturating_sub(512), file_size.saturating_sub(1024)]
+                .iter()
+                .find_map(|&off| {
+                    read_512_at(path, off).ok().and_then(|raw| {
+                        let (c, _, p, k) = read_header_plaintext(&raw);
+                        if p > 0 || k > 0 { Some((c, p, k)) } else { None }
+                    })
+                })
+                .unwrap_or((cipher0, n_pw0, n_key0))
+        } else {
+            (cipher0, n_pw0, n_key0)
+        };
+
+        let k_outer = match &credential {
+            OpenCredential::Password(pw)     => try_pw_slots(path, pw, n_pw, cipher),
+            OpenCredential::PrivateKey(priv_) => try_key_slots(path, priv_, n_key, cipher),
+        };
+
+        // Try to authenticate against each header copy (cheap AEAD, no extra KDF).
+        // Order: primary → EOF-512 backup → EOF-1024 backup.
+        if let Some(k) = k_outer {
+            let offsets = [0u64, file_size.saturating_sub(512), file_size.saturating_sub(1024)];
+            for &off in &offsets {
+                if let Ok(raw) = read_512_at(path, off) {
+                    if let Ok(meta) = decode_header(&raw, &k, false) {
+                        let store = open_store(path, k, meta.cipher, 0, meta.outer_slots, OUTER_ALLOC_SLOT)?;
+                        store.load_free_list()?;
+                        return Ok(VnmContainer {
+                            root_slot:   meta.root_slot,
+                            is_hidden:   false,
+                            cipher:      meta.cipher,
+                            outer_slots: meta.outer_slots,
+                            outer_limit: meta.outer_slots,
+                            label:       label_from(meta.label),
+                            created_at:  meta.created_at,
+                            k_master:    k,
+                            store,
+                            path:        path.to_path_buf(),
+                        });
+                    }
+                }
+            }
         }
 
-        // Try hidden volume: primary at EOF-512, then backup at EOF-1024.
+        // ── Hidden volume ─────────────────────────────────────────────────────
+        // Primary at EOF-512, backup at [512..1024].
         if let OpenCredential::Password(pw) = &credential {
             let hidden = try_hidden_at(path, file_size.saturating_sub(512), pw)
-                .or_else(|| {
-                    if file_size >= 1024 { try_hidden_at(path, file_size - 1024, pw) }
-                    else { None }
-                });
+                .or_else(|| try_hidden_at(path, 512, pw));
 
             if let Some((k, meta)) = hidden {
                 let hid_start = meta.hidden_start;
@@ -524,6 +560,10 @@ fn try_key_slots(path: &Path, private: &HybridPrivateKey, n: u8, cipher: CipherA
 }
 
 /// Re-write the outer header (primary + backup) with updated slot counts.
+///
+/// The backup offset is inferred from the file tail size:
+///   outer-only (tail = 512 B):  backup at EOF-512
+///   with hidden (tail = 1024 B): backup at EOF-1024 (leaves EOF-512 for hidden primary)
 fn update_slot_counts(
     path: &Path, n_pw: u8, n_key: u8, k_master: &[u8; 32],
     _cipher: CipherAlgorithm, old_raw: &[u8; 512],
@@ -531,21 +571,13 @@ fn update_slot_counts(
     let meta = decode_header(old_raw, k_master, false)?;
     let new_payload = HeaderPayload { num_password_slots: n_pw, num_key_slots: n_key, ..meta };
     let new_hdr = encode_header(&new_payload, k_master, false)?;
-    write_bytes_at(path, 0,   &new_hdr)?; // primary
-    write_bytes_at(path, 512, &new_hdr)   // backup
-}
 
-/// Try to open the outer volume from a specific header offset.
-/// Returns (K_master, HeaderPayload) on success, None on wrong credential or corruption.
-fn try_outer_at(path: &Path, hdr_offset: u64, credential: &OpenCredential<'_>) -> Option<([u8; 32], HeaderPayload)> {
-    let raw = read_512_at(path, hdr_offset).ok()?;
-    let (cipher, _, n_pw, n_key) = read_header_plaintext(&raw);
-    let k = match credential {
-        OpenCredential::Password(pw)    => try_pw_slots(path, pw, n_pw, cipher),
-        OpenCredential::PrivateKey(prv) => try_key_slots(path, prv, n_key, cipher),
-    }?;
-    let meta = decode_header(&raw, &k, false).ok()?;
-    Some((k, meta))
+    let file_size  = std::fs::metadata(path)?.len();
+    let tail       = (file_size.saturating_sub(DATA_AREA_OFFSET)) % SLOT_SIZE as u64;
+    let backup_off = if tail == 1024 { file_size - 1024 } else { file_size - 512 };
+
+    write_bytes_at(path, 0,          &new_hdr)?; // primary
+    write_bytes_at(path, backup_off, &new_hdr)   // backup (EOF-512 or EOF-1024)
 }
 
 /// Try to open a hidden volume from a specific header offset.

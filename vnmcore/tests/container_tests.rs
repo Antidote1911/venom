@@ -62,7 +62,7 @@ fn backup_header_survives_primary_corruption() {
         f.write_all(&[0u8; 512]).unwrap();
     }
 
-    // Container must still open using the backup header at [512..1024]
+    // Container must still open using the backup header at EOF-512
     let c = VnmContainer::open(&path, OpenCredential::Password(b"password")).unwrap();
     assert_eq!(c.label.as_deref(), Some("backup test"));
     assert!(!c.is_hidden);
@@ -89,7 +89,7 @@ fn hidden_backup_header_survives_primary_corruption() {
         f.write_all(&[0u8; 512]).unwrap();
     }
 
-    // Hidden volume must still open using the backup header at EOF-1024
+    // Hidden volume must still open using the backup header at [512..1024]
     let c = VnmContainer::open(&path, OpenCredential::Password(b"hidden")).unwrap();
     assert!(c.is_hidden);
     assert_eq!(c.label.as_deref(), Some("Hidden"));
