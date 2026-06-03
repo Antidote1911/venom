@@ -87,6 +87,15 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->btnBrowseCreate, &QPushButton::clicked, this, &MainWindow::browseCreatePath);
     connect(ui->btnCreateContainer, &QPushButton::clicked, this, &MainWindow::onCreateContainer);
 
+    // Key-only warning: shown when password is empty and at least one key recipient is selected
+    auto updateKeyOnlyWarning = [this]() {
+        const bool keyOnly = ui->lePassword->text().isEmpty()
+                          && !ui->listCreateKeys->selectedItems().isEmpty();
+        ui->lblKeyOnlyWarning->setVisible(keyOnly);
+    };
+    connect(ui->lePassword,        &QLineEdit::textChanged,          this, updateKeyOnlyWarning);
+    connect(ui->listCreateKeys,    &QListWidget::itemSelectionChanged, this, updateKeyOnlyWarning);
+
     // ── Tab 2 — Mount container ───────────────────────────────────────────────
     connect(ui->btnBrowseVault,      &QPushButton::clicked, this, &MainWindow::browseVaultPath);
     connect(ui->btnBrowseMountpoint, &QPushButton::clicked, this, &MainWindow::browseMountpoint);
@@ -114,15 +123,10 @@ MainWindow::MainWindow(QWidget* parent)
         if (idx == 2) refreshKeyList();
     });
 
-    // Mount key list: clicking a local key auto-fills the path field
+    // When a local key is selected, clear the external path field to avoid ambiguity
     connect(ui->listMountKeys, &QListWidget::currentRowChanged, this, [this](int row){
-        if (row < 0 || row >= m_keys.size()) return;
-        const auto& k = m_keys.at(row);
-        if (k.isPubOnly) return; // can't mount with a public-only key
-        const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
-        const QString path = home + QStringLiteral("/.config/venom/keys/") + k.filename;
-        ui->leKeyPath->setText(path);
-        ui->leKeyPath->setToolTip(path);
+        if (row >= 0 && row < m_keys.size() && !m_keys.at(row).isPubOnly)
+            ui->leKeyPath->clear();
     });
 
     // ── VenomCore signals ─────────────────────────────────────────────────────
@@ -318,8 +322,19 @@ void MainWindow::onMount()
     if (ui->rbMountPassword->isChecked()) {
         m_core->mountWithPassword(vault, mp, ui->leMountPassword->text());
     } else {
-        const QString kp = ui->leKeyPath->text().trimmed();
-        if (kp.isEmpty()) { QMessageBox::warning(this, {}, tr("Select a .key file.")); return; }
+        // Priority: selected key from the local store, then manually entered path
+        QString kp;
+        const int row = ui->listMountKeys->currentRow();
+        if (row >= 0 && row < m_keys.size() && !m_keys.at(row).isPubOnly) {
+            const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
+            kp = home + QStringLiteral("/.config/venom/keys/") + m_keys.at(row).filename;
+        } else {
+            kp = ui->leKeyPath->text().trimmed();
+        }
+        if (kp.isEmpty()) {
+            QMessageBox::warning(this, {}, tr("Select a key from the list or browse for a .key file."));
+            return;
+        }
         m_core->mountWithKey(vault, mp, kp, ui->leKeyPassphrase->text());
     }
 }

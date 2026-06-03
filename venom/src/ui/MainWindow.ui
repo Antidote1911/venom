@@ -509,6 +509,22 @@
             </layout>
            </item>
            <item>
+            <widget class="QLabel" name="lblKeyOnlyWarning">
+             <property name="visible">
+              <bool>false</bool>
+             </property>
+             <property name="text">
+              <string>⚠  Key-only container — no passphrase slot will be created. Mount will require a private key.</string>
+             </property>
+             <property name="wordWrap">
+              <bool>true</bool>
+             </property>
+             <property name="styleSheet">
+              <string>color: #e67e22; font-style: italic;</string>
+             </property>
+            </widget>
+           </item>
+           <item>
             <widget class="QGroupBox" name="grpRecipients">
              <property name="toolTip">
               <string>Container will be accessible with any of the selected keys</string>
