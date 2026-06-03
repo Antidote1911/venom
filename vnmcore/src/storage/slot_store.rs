@@ -89,10 +89,23 @@ impl SlotStore {
         DATA_AREA_OFFSET + slot * SLOT_SIZE as u64
     }
 
+    /// Derive a slot-specific 32-byte key from K_master and the slot index.
+    ///
+    /// Using a per-slot key means that a cipher-level compromise of one slot's
+    /// key does not expose K_master or any other slot's key.
+    /// The slot index is also kept as AEAD AAD for an independent binding layer.
+    fn derive_slot_key(&self, slot: u64) -> [u8; 32] {
+        let mut ikm = [0u8; 40]; // K_master(32) || slot_index_le8(8)
+        ikm[..32].copy_from_slice(&*self.master_key);
+        ikm[32..].copy_from_slice(&slot.to_le_bytes());
+        blake3::derive_key("venom:slot:v1", &ikm)
+    }
+
     /// Encrypt `plaintext` and write it to `slot`.
     pub fn write(&self, slot: u64, plaintext: &[u8]) -> Result<()> {
-        let aad = slot.to_le_bytes();
-        let encrypted = encrypt_block(&self.master_key, self.cipher, &aad, plaintext)?;
+        let slot_key = self.derive_slot_key(slot);
+        let aad      = slot.to_le_bytes();
+        let encrypted = encrypt_block(&slot_key, self.cipher, &aad, plaintext)?;
 
         if encrypted.len() + 4 > SLOT_SIZE {
             return Err(VnmError::Serialization("plaintext too large for one slot".into()));
@@ -126,8 +139,9 @@ impl SlotStore {
             return Err(VnmError::CorruptedSlot(slot, "invalid length prefix".into()));
         }
 
-        let aad = slot.to_le_bytes();
-        decrypt_block(&self.master_key, self.cipher, &aad, &buf[4..4 + len])
+        let slot_key = self.derive_slot_key(slot);
+        let aad      = slot.to_le_bytes();
+        decrypt_block(&slot_key, self.cipher, &aad, &buf[4..4 + len])
             .map_err(|_| VnmError::CorruptedSlot(slot, "authentication failed".into()))
     }
 
