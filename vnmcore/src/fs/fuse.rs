@@ -46,6 +46,12 @@ pub mod driver {
     /// 256 × 30 KB ≈ 7.7 MB.
     const MAX_CACHE_CHUNKS: usize = 256;
 
+    /// When dirty continuation chunks exceed this threshold, flush the excess
+    /// to disk immediately (write-through) so RAM stays bounded during large
+    /// sequential writes.  Chunk 0 is excluded — it shares the head slot and
+    /// can only be written when the full head metadata is known at close time.
+    const WRITE_THROUGH_THRESHOLD: usize = MAX_CACHE_CHUNKS / 2; // 128 × 30 KB ≈ 3.8 MB
+
     // ── Inode ↔ slot mapping ──────────────────────────────────────────────────
 
     pub(crate) struct InodeMap {
@@ -277,6 +283,47 @@ pub mod driver {
         }
 
         // ── Flush helpers ─────────────────────────────────────────────────────
+
+        /// Flush the `n` lowest-index dirty continuation chunks (ci ≥ 1) to disk.
+        ///
+        /// Called from `op_write` when dirty count exceeds WRITE_THROUGH_THRESHOLD.
+        /// Continuation slots can be written independently of the head slot, so
+        /// this keeps RAM bounded during large sequential copies without requiring
+        /// a full flush (which would also update the head and index chain).
+        fn write_through_flush(&mut self, fh: u64, n: usize) -> Result<(), i32> {
+            let container = Arc::clone(&self.container);
+            let of = match self.open_files.get_mut(&fh) { Some(o) => o, None => return Ok(()) };
+
+            // Collect the n lowest dirty continuation chunk indices
+            let mut to_flush: Vec<usize> = of.dirty.iter()
+                .copied()
+                .filter(|&ci| ci >= 1)
+                .collect();
+            to_flush.sort_unstable();
+            to_flush.truncate(n);
+
+            for ci in to_flush {
+                let data = match of.cache.get(&ci) { Some(d) => d.clone(), None => continue };
+                let node = VaultNode::FileData(FileDataBlock { kind: NodeKind::FileData, data });
+
+                match of.slot_map.get(ci) {
+                    Some(Some(slot_id)) => {
+                        container.update_node(*slot_id, &node).map_err(|_| EIO)?;
+                    }
+                    Some(None) => {
+                        let new_slot = container.write_node(&node).map_err(|_| EIO)?;
+                        of.slot_map[ci] = Some(new_slot);
+                        of.meta_dirty = true;
+                    }
+                    None => continue,
+                }
+
+                of.dirty.remove(&ci);
+                of.cache.remove(&ci);
+            }
+
+            Ok(())
+        }
 
         fn flush_fh(&mut self, fh: u64) -> Result<(), i32> {
             // Check if there's anything to do before taking ownership
@@ -554,6 +601,16 @@ pub mod driver {
 
                 pos += take;
             }
+
+            // Write-through: flush oldest dirty continuation chunks when threshold
+            // is exceeded so that large sequential copies don't accumulate GBs in RAM.
+            let dirty_cont = self.open_files.get(&fh)
+                .map(|of| of.dirty.iter().filter(|&&ci| ci >= 1).count())
+                .unwrap_or(0);
+            if dirty_cont > WRITE_THROUGH_THRESHOLD {
+                self.write_through_flush(fh, dirty_cont - WRITE_THROUGH_THRESHOLD / 2)?;
+            }
+
             Ok(data.len() as u32)
         }
 
@@ -918,6 +975,36 @@ pub mod driver {
             let fh2  = fuse.op_open(ino).unwrap();
             let back = fuse.op_read(ino, fh2, 0, payload.len() as u32 + 1).unwrap();
             assert_eq!(back, payload);
+            std::fs::remove_file(&path).ok();
+        }
+
+        #[test]
+        fn write_through_keeps_cache_bounded() {
+            // Write WRITE_THROUGH_THRESHOLD * 3 chunks and verify that
+            // the in-memory dirty count never exceeds the threshold + 1.
+            let (_c, mut fuse, path) = setup("write_through");
+            let (ino, fh) = fuse.op_create(ROOT_INO, "large.bin").unwrap();
+
+            let chunk = vec![0xABu8; CHUNK_SIZE];
+            let limit = WRITE_THROUGH_THRESHOLD * 3 + 1;
+            for i in 0..limit {
+                fuse.op_write(ino, fh, (i * CHUNK_SIZE) as i64, &chunk).unwrap();
+                let dirty_cont = fuse.open_files[&fh].dirty.iter().filter(|&&ci| ci >= 1).count();
+                assert!(
+                    dirty_cont <= WRITE_THROUGH_THRESHOLD + 1,
+                    "dirty continuation chunks = {dirty_cont} at chunk {i}, expected ≤ {}",
+                    WRITE_THROUGH_THRESHOLD + 1
+                );
+            }
+
+            // Data must be fully readable after release
+            fuse.op_release(fh).unwrap();
+            let fh2 = fuse.op_open(ino).unwrap();
+            let back = fuse.op_read(ino, fh2, 0, CHUNK_SIZE as u32).unwrap();
+            assert_eq!(back, chunk);
+            let tail_off = ((limit - 1) * CHUNK_SIZE) as i64;
+            let back_tail = fuse.op_read(ino, fh2, tail_off, CHUNK_SIZE as u32).unwrap();
+            assert_eq!(back_tail, chunk);
             std::fs::remove_file(&path).ok();
         }
 
