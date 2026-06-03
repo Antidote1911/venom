@@ -414,3 +414,102 @@ fn merkle_detects_tampered_slot() {
     }
     std::fs::remove_file(&path).ok();
 }
+
+// ── USB key workflow ──────────────────────────────────────────────────────────
+
+#[test]
+fn key_generated_to_custom_dir() {
+    // Simulates vnm_key_generate_to_dir: key saved outside ~/.config/venom/keys/
+    let dir = std::env::temp_dir()
+        .join(format!("vnm_usb_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let key = vnmcore::hybrid_generate();
+    let fp_hex: String = key.public.fingerprint()
+        .iter().map(|b| format!("{b:02x}")).collect();
+    let key_path = dir.join(format!("{fp_hex}.key"));
+
+    // Write key to "USB" directory
+    vnmcore::write_key_file(&key_path, &key, "usb-key").unwrap();
+
+    // Verify: file exists, filename = fingerprint hex, content readable
+    assert!(key_path.exists(), "key file should exist at USB path");
+    let kf = vnmcore::read_key_file(&key_path).unwrap();
+    assert_eq!(kf.label, "usb-key");
+    assert_eq!(kf.key.public.fingerprint(), key.public.fingerprint());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn container_opens_with_key_from_arbitrary_path() {
+    // Full USB workflow: key lives outside local store, container is key-only.
+    let key_dir = std::env::temp_dir()
+        .join(format!("vnm_usb_wf_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&key_dir);
+    std::fs::create_dir_all(&key_dir).unwrap();
+
+    let container_path = tmp("usb_workflow");
+    let _ = std::fs::remove_file(&container_path);
+
+    // Generate key directly to "USB" directory
+    let key = vnmcore::hybrid_generate();
+    let fp_hex: String = key.public.fingerprint()
+        .iter().map(|b| format!("{b:02x}")).collect();
+    let key_path = key_dir.join(format!("{fp_hex}.key"));
+    vnmcore::write_key_file(&key_path, &key, "usb-key").unwrap();
+
+    // Create a key-only container (no password slot)
+    let c = VnmContainer::create(
+        &container_path, b"", 4 * MB,
+        CipherAlgorithm::XChaCha20Poly1305,
+        "interactive", None, None,
+    ).unwrap();
+    c.add_key_recipient(&key.public).unwrap();
+    c.flush().unwrap();
+    drop(c);
+
+    // Open using the key read from the "USB" path — not from local store
+    let kf = vnmcore::read_key_file(&key_path).unwrap();
+    assert!(
+        VnmContainer::open(&container_path, OpenCredential::PrivateKey(&kf.key)).is_ok(),
+        "should open with key from arbitrary path"
+    );
+
+    std::fs::remove_file(&container_path).ok();
+    std::fs::remove_dir_all(&key_dir).ok();
+}
+
+#[test]
+fn container_rejects_wrong_usb_key() {
+    // A different key (different "USB") must not open the container.
+    let key_dir = std::env::temp_dir()
+        .join(format!("vnm_usb_rej_{}", std::process::id()));
+    std::fs::create_dir_all(&key_dir).unwrap();
+
+    let container_path = tmp("usb_reject");
+    let _ = std::fs::remove_file(&container_path);
+
+    let key_owner = vnmcore::hybrid_generate();
+    let key_other = vnmcore::hybrid_generate();
+
+    // Container encrypted for key_owner only
+    let c = VnmContainer::create(
+        &container_path, b"", 4 * MB,
+        CipherAlgorithm::XChaCha20Poly1305,
+        "interactive", None, None,
+    ).unwrap();
+    c.add_key_recipient(&key_owner.public).unwrap();
+    c.flush().unwrap();
+    drop(c);
+
+    // key_other (wrong "USB") must be rejected
+    assert!(
+        VnmContainer::open(&container_path, OpenCredential::PrivateKey(&key_other)).is_err(),
+        "wrong key should be rejected"
+    );
+
+    std::fs::remove_file(&container_path).ok();
+    std::fs::remove_dir_all(&key_dir).ok();
+}
