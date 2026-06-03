@@ -316,7 +316,8 @@ void MainWindow::onGenerateKey()
 void MainWindow::onImportKey()
 {
     const QString src = QFileDialog::getOpenFileName(
-        this, tr("Import keypair"), {}, tr("Venom key (*.key);;All files (*)"));
+        this, tr("Import key"), {},
+        tr("Venom keys (*.key *.pub);;Keypair (*.key);;Public key (*.pub);;All files (*)"));
     if (src.isEmpty()) return;
 
     const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
