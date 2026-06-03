@@ -470,3 +470,39 @@ pub extern "C" fn vnm_keylist_get(list: *const VnmKeyList, i: usize, out: *mut V
     info.is_pub_only  = *pub_only;
     true
 }
+
+/// Read public metadata from a .key or .pub file (no passphrase needed).
+/// Returns false if the file cannot be read or is not a valid Venom key file.
+#[no_mangle]
+pub extern "C" fn vnm_key_read_info(
+    key_path: *const c_char,
+    info_out:  *mut VnmKeyInfo,
+) -> bool {
+    if key_path.is_null() || info_out.is_null() { return false; }
+    let Some(kp) = cstr(key_path) else { return false; };
+    let path = std::path::Path::new(kp);
+
+    // Try .key first (read_key_public), then .pub (read_pub_file)
+    let (fp, label, created_at, is_protected, is_pub_only) =
+        if let Ok(d) = read_key_public(path) {
+            (fp_display(&d.public.fingerprint()), d.label, d.created_at, d.is_protected, false)
+        } else if let Ok(d) = vnmcore::read_pub_file(path) {
+            (fp_display(&d.public.fingerprint()), d.label, d.created_at, false, true)
+        } else {
+            return false;
+        };
+
+    let info = unsafe { &mut *info_out };
+    *info = VnmKeyInfo {
+        fingerprint:  [0; 24],
+        label:        [0; 128],
+        filename:     [0; 256],
+        created_at,
+        is_protected,
+        is_pub_only,
+    };
+    fill(&mut info.fingerprint, &fp);
+    fill(&mut info.label,       &label);
+    fill(&mut info.filename,    path.file_name().and_then(|n| n.to_str()).unwrap_or(""));
+    true
+}
