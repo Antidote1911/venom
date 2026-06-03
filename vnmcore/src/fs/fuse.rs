@@ -840,7 +840,7 @@ pub mod driver {
             let path = tmp(label);
             let _ = std::fs::remove_file(&path);
             let c = Arc::new(VnmContainer::create(
-                &path, b"pass", 32 * MB, CipherAlgorithm::ChaCha20Poly1305, "interactive", None, None,
+                &path, b"pass", 32 * MB, CipherAlgorithm::XChaCha20Poly1305, "interactive", None, None,
             ).unwrap());
             let fuse = VenomFuse::new(c.clone());
             (c, fuse, path)
@@ -921,7 +921,7 @@ pub mod driver {
             let path = tmp("drop_flush");
             let _ = std::fs::remove_file(&path);
             let c = Arc::new(VnmContainer::create(
-                &path, b"pass", 16 * MB, CipherAlgorithm::ChaCha20Poly1305, "interactive", None, None,
+                &path, b"pass", 16 * MB, CipherAlgorithm::XChaCha20Poly1305, "interactive", None, None,
             ).unwrap());
             let slot = {
                 let mut fuse = VenomFuse::new(c.clone());

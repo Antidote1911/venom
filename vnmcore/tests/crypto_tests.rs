@@ -22,8 +22,8 @@ fn chacha20_round_trip() {
     let plaintext = b"Hello, encrypted world!";
     let block_id = b"test-block-001";
 
-    let ciphertext = encrypt_block(&key, CipherAlgorithm::ChaCha20Poly1305, block_id, plaintext).unwrap();
-    let recovered = decrypt_block(&key, CipherAlgorithm::ChaCha20Poly1305, block_id, &ciphertext).unwrap();
+    let ciphertext = encrypt_block(&key, CipherAlgorithm::XChaCha20Poly1305, block_id, plaintext).unwrap();
+    let recovered = decrypt_block(&key, CipherAlgorithm::XChaCha20Poly1305, block_id, &ciphertext).unwrap();
 
     assert_eq!(recovered, plaintext);
 }
@@ -47,8 +47,8 @@ fn wrong_key_fails_authentication() {
     let plaintext = b"secret data";
     let block_id = b"test-block-003";
 
-    let ciphertext = encrypt_block(&key_a, CipherAlgorithm::ChaCha20Poly1305, block_id, plaintext).unwrap();
-    let result = decrypt_block(&key_b, CipherAlgorithm::ChaCha20Poly1305, block_id, &ciphertext);
+    let ciphertext = encrypt_block(&key_a, CipherAlgorithm::XChaCha20Poly1305, block_id, plaintext).unwrap();
+    let result = decrypt_block(&key_b, CipherAlgorithm::XChaCha20Poly1305, block_id, &ciphertext);
 
     assert!(result.is_err(), "decryption with wrong key must fail");
 }
@@ -59,8 +59,8 @@ fn wrong_block_id_fails_aad() {
     let key = derive_test_key(b"password");
     let plaintext = b"sensitive";
 
-    let ciphertext = encrypt_block(&key, CipherAlgorithm::ChaCha20Poly1305, b"block-A", plaintext).unwrap();
-    let result = decrypt_block(&key, CipherAlgorithm::ChaCha20Poly1305, b"block-B", &ciphertext);
+    let ciphertext = encrypt_block(&key, CipherAlgorithm::XChaCha20Poly1305, b"block-A", plaintext).unwrap();
+    let result = decrypt_block(&key, CipherAlgorithm::XChaCha20Poly1305, b"block-B", &ciphertext);
 
     assert!(result.is_err(), "swapped block_id must be rejected by AAD check");
 }
@@ -103,8 +103,8 @@ fn encrypt_produces_different_nonces() {
     let plaintext = b"same plaintext";
     let block_id = b"nonce-test";
 
-    let c1 = encrypt_block(&key, CipherAlgorithm::ChaCha20Poly1305, block_id, plaintext).unwrap();
-    let c2 = encrypt_block(&key, CipherAlgorithm::ChaCha20Poly1305, block_id, plaintext).unwrap();
+    let c1 = encrypt_block(&key, CipherAlgorithm::XChaCha20Poly1305, block_id, plaintext).unwrap();
+    let c2 = encrypt_block(&key, CipherAlgorithm::XChaCha20Poly1305, block_id, plaintext).unwrap();
 
     assert_ne!(c1, c2, "successive encryptions must use different nonces");
 }

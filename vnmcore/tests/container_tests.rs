@@ -17,11 +17,11 @@ fn tmp(name: &str) -> std::path::PathBuf {
 fn create_and_reopen_chacha() {
     let path = tmp("chacha");
     let _ = std::fs::remove_file(&path);
-    VnmContainer::create(&path, b"password", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
+    VnmContainer::create(&path, b"password", 4*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", Some("test".into()), None).unwrap();
     let c = VnmContainer::open(&path, OpenCredential::Password(b"password")).unwrap();
     assert_eq!(c.label.as_deref(), Some("test"));
-    assert_eq!(c.cipher, CipherAlgorithm::ChaCha20Poly1305);
+    assert_eq!(c.cipher, CipherAlgorithm::XChaCha20Poly1305);
     assert!(!c.is_hidden);
     std::fs::remove_file(&path).ok();
 }
@@ -40,7 +40,7 @@ fn create_and_reopen_aes() {
 fn wrong_password_rejected() {
     let path = tmp("wrong_pw");
     let _ = std::fs::remove_file(&path);
-    VnmContainer::create(&path, b"correct", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
+    VnmContainer::create(&path, b"correct", 4*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", None, None).unwrap();
     assert!(VnmContainer::open(&path, OpenCredential::Password(b"wrong")).is_err());
     std::fs::remove_file(&path).ok();
@@ -54,7 +54,7 @@ fn rollback_detected_after_container_replaced() {
     let _ = std::fs::remove_file(&path);
 
     // Create and mount the container (flush establishes generation baseline)
-    let c = VnmContainer::create(&path, b"pw", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
+    let c = VnmContainer::create(&path, b"pw", 4*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", None, None).unwrap();
     c.flush().unwrap(); // generation = 1, stored in rollback state
     let snapshot = std::fs::read(&path).unwrap(); // snapshot at generation 1
@@ -84,7 +84,7 @@ fn reset_rollback_allows_deliberate_restore() {
     let path = tmp("rollback_reset");
     let _ = std::fs::remove_file(&path);
 
-    let c = VnmContainer::create(&path, b"pw", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
+    let c = VnmContainer::create(&path, b"pw", 4*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", None, None).unwrap();
     c.flush().unwrap();
     let snapshot = std::fs::read(&path).unwrap();
@@ -111,7 +111,7 @@ fn backup_header_survives_primary_corruption() {
     use std::io::{Seek, SeekFrom, Write};
     let path = tmp("header_backup");
     let _ = std::fs::remove_file(&path);
-    VnmContainer::create(&path, b"password", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
+    VnmContainer::create(&path, b"password", 4*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", Some("backup test".into()), None).unwrap();
 
     // Corrupt the primary outer header (first 512 bytes) with zeros
@@ -133,7 +133,7 @@ fn hidden_backup_header_survives_primary_corruption() {
     use std::io::{Seek, SeekFrom, Write};
     let path = tmp("hidden_backup");
     let _ = std::fs::remove_file(&path);
-    VnmContainer::create(&path, b"outer", 8*MB, CipherAlgorithm::ChaCha20Poly1305,
+    VnmContainer::create(&path, b"outer", 8*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", Some("Outer".into()),
         Some(vnmcore::fs::container::HiddenVolumeOptions {
             password: b"hidden", size_bytes: 2*MB,
@@ -161,7 +161,7 @@ fn hidden_backup_header_survives_primary_corruption() {
 fn root_block_is_empty_directory() {
     let path = tmp("root");
     let _ = std::fs::remove_file(&path);
-    let c = VnmContainer::create(&path, b"pass", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
+    let c = VnmContainer::create(&path, b"pass", 4*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", None, None).unwrap();
     match c.read_node(c.root_slot()).unwrap() {
         VaultNode::Directory(d) => assert!(d.entries.is_empty()),
@@ -198,7 +198,7 @@ fn write_and_read_file_node() {
 fn data_survives_reopen() {
     let path = tmp("reopen");
     let _ = std::fs::remove_file(&path);
-    let c = VnmContainer::create(&path, b"pass", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
+    let c = VnmContainer::create(&path, b"pass", 4*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", Some("vault".into()), None).unwrap();
     let content = b"persistent".to_vec();
     let file = VaultNode::File(FileBlock {
@@ -222,7 +222,7 @@ fn data_survives_reopen() {
 fn hidden_volume_both_passwords_work() {
     let path = tmp("hidden");
     let _ = std::fs::remove_file(&path);
-    VnmContainer::create(&path, b"outer-pass", 8*MB, CipherAlgorithm::ChaCha20Poly1305,
+    VnmContainer::create(&path, b"outer-pass", 8*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", Some("Outer".into()),
         Some(HiddenVolumeOptions { password: b"hidden-pass", size_bytes: 2*MB,
             label: Some("Hidden".into()), kdf_profile: "interactive" })).unwrap();
@@ -256,7 +256,7 @@ fn add_key_recipient_and_open_with_private_key() {
     let path = tmp("hybrid_recipient");
     let _ = std::fs::remove_file(&path);
 
-    let c = VnmContainer::create(&path, b"outer", 8*MB, CipherAlgorithm::ChaCha20Poly1305,
+    let c = VnmContainer::create(&path, b"outer", 8*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", Some("Hybrid test".into()), None).unwrap();
 
     let alice = hybrid_generate();
@@ -279,7 +279,7 @@ fn multiple_key_recipients() {
     let path = tmp("multi_hybrid");
     let _ = std::fs::remove_file(&path);
 
-    let c = VnmContainer::create(&path, b"pw", 8*MB, CipherAlgorithm::ChaCha20Poly1305,
+    let c = VnmContainer::create(&path, b"pw", 8*MB, CipherAlgorithm::XChaCha20Poly1305,
         "interactive", None, None).unwrap();
 
     let alice = hybrid_generate();

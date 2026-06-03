@@ -19,17 +19,17 @@
 //!   [1689..1721] x25519_sk [u8; 32]
 //!   [1721..1785] mlkem_seed [u8; 64]
 //!
-//! ### Passphrase-protected (1886 bytes, protected byte = 1)
+//! ### Passphrase-protected (1898 bytes, protected byte = 1)
 //!
 //!   [0..1688]   same public header + public keys + protected = 1
 //!   [1689..1753] argon2_salt [u8; 64]
 //!   [1753]      kdf_profile u8 (0=interactive, 1=sensitive)
-//!   [1754..1886] encrypt_block(
+//!   [1754..1898] encrypt_block(
 //!                    derived_key,
-//!                    ChaCha20-Poly1305,
+//!                    XChaCha20-Poly1305,
 //!                    aad = b"vnm:key:protect:v1",
 //!                    x25519_sk(32) || mlkem_seed(64)
-//!                ) = 20 (VNMB) + 96 (plaintext) + 16 (tag) = 132 bytes
+//!                ) = 32 (VNMB) + 96 (plaintext) + 16 (tag) = 144 bytes
 //!
 //! ## .pub file — public portion only (1688 bytes, safe to share)
 //!
@@ -53,7 +53,7 @@ use crate::crypto::kem::EK_SIZE;
 const KEY_MAGIC:    &[u8; 4] = b"VKEY";
 const PUB_MAGIC:    &[u8; 4] = b"VPUB";
 const FILE_VERSION: u32       = 1;
-const CIPHER:       CipherAlgorithm = CipherAlgorithm::ChaCha20Poly1305;
+const CIPHER:       CipherAlgorithm = CipherAlgorithm::XChaCha20Poly1305;
 const PROTECT_AAD:  &[u8]    = b"vnm:key:protect:v1";
 
 // Fixed offsets common to all .key files
@@ -62,12 +62,12 @@ const OFF_MLKEM_EK:   usize = 120;
 const OFF_PROTECTED:  usize = 1688;  // = 88 + 32 + 1568
 const OFF_PRIV_START: usize = 1689;
 
-// VNMB-encrypted block size for 96 bytes of plaintext:
-//   4 magic + 4 version + 12 nonce + 96 plaintext + 16 tag = 132
-const ENC_PRIV_SIZE: usize = 132;
+// VNMB-encrypted block size for 96 bytes of plaintext (XChaCha20-Poly1305):
+//   4 magic + 4 version + 24 nonce + 96 plaintext + 16 tag = 144
+const ENC_PRIV_SIZE: usize = 144;
 
 pub const KEY_FILE_SIZE:           usize = OFF_PRIV_START + 32 + 64;           // 1785
-pub const KEY_FILE_PROTECTED_SIZE: usize = OFF_PRIV_START + 64 + 1 + ENC_PRIV_SIZE; // 1886
+pub const KEY_FILE_PROTECTED_SIZE: usize = OFF_PRIV_START + 64 + 1 + ENC_PRIV_SIZE; // 1898
 pub const PUB_FILE_SIZE:           usize = 88 + 32 + EK_SIZE;                  // 1688
 
 // ── Shared header helpers ─────────────────────────────────────────────────────

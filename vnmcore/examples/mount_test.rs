@@ -20,7 +20,7 @@ fn main() {
         println!("[1/3] Creating new container {container_path} (16 MB)…");
         VnmContainer::create(
             container_path, b"test-password", 16 * MB,
-            CipherAlgorithm::ChaCha20Poly1305, "interactive",
+            CipherAlgorithm::XChaCha20Poly1305, "interactive",
             Some("test".into()), None,
         ).expect("create failed")
     };

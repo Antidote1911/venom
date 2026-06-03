@@ -42,14 +42,14 @@ Constantes :
 | `HEADER_REGION_SIZE`   |   1 024 | fixe (2 × 512)                                |
 | `MAX_PASSWORD_SLOTS`   |       8 | fixe                                          |
 | `MAX_KEY_SLOTS`        |       8 | fixe                                          |
-| `PW_SLOT_SIZE`         |     101 | 32 + 1 + 68                                   |
-| `KEY_SLOT_SIZE`        |   1 668 | 32 + 1 568 + 68                               |
-| `RECIPIENT_AREA_SIZE`  |  14 152 | 8 × 101 + 8 × 1 668                           |
-| `DATA_AREA_OFFSET`     |  15 176 | 1 024 + 14 152                                |
+| `PW_SLOT_SIZE`         |     113 | 32 + 1 + 80                                   |
+| `KEY_SLOT_SIZE`        |   1 680 | 32 + 1 568 + 80                               |
+| `RECIPIENT_AREA_SIZE`  |  14 344 | 8 × 113 + 8 × 1 680                           |
+| `DATA_AREA_OFFSET`     |  15 368 | 1 024 + 14 344                                |
 | `SLOT_SIZE`            |  32 768 | fixe                                          |
 
 Taille minimale d'un fichier conteneur :
-`DATA_AREA_OFFSET + 16 × SLOT_SIZE + 512 = 15 176 + 524 288 + 512 = 539 976 octets`
+`DATA_AREA_OFFSET + 16 × SLOT_SIZE + 512 = 15 368 + 524 288 + 512 = 540 168 octets`
 
 ---
 
@@ -86,11 +86,14 @@ Offset  Taille  Description
 ──────────────────────────────────────────────────────────────────────────
 68       4      magic b"VNMB"
 72       4      version u32 LE = 1
-76      12      nonce (aléatoire par écriture)
-88     396      corps chiffré (voir §2.3)
-484     16      tag AEAD
+76      24      nonce 192 bits (aléatoire par écriture, XChaCha20)
+100    396      corps chiffré (voir §2.3)
+496     16      tag AEAD
 ──────────────────────────────────────────────────────────────────────────
 ```
+
+> Pour AES-256-GCM le nonce est de 12 octets : le VNMB header fait alors 20 octets
+> et le corps occupe [68..496] avec 16 octets inutilisés à la fin [496..512].
 
 AAD (données authentifiées non chiffrées) :
 - En-tête extérieur : `b"vnm:header:outer:v1"`
@@ -107,7 +110,7 @@ Offset  Taille  Type        Description
 4        4      u32 LE      version du corps
                               1 = volume extérieur (encode_header)
                               3 = volume caché (encode_header_with_password)
-8        8      u64 LE      data_area_offset = 15 176
+8        8      u64 LE      data_area_offset = 15 368
 16       8      u64 LE      outer_slots
                               volume extérieur : nombre de slots alloués
                               volume caché     : nombre de slots du volume caché
@@ -148,9 +151,9 @@ Disposition fixe, jamais réallouée :
 Offset                  Taille          Description
 ──────────────────────────────────────────────────────────────────────────
 1 024                   8 × 101 = 808   8 password slots (voir §3.1)
-1 024 + 808 = 1 832     8 × 1 668 = 13 344   8 hybrid key slots (voir §3.2)
+1 024 + 904 = 1 928     8 × 1 680 = 13 440   8 hybrid key slots (voir §3.2)
 ──────────────────────────────────────────────────────────────────────────
-Total                   14 152 octets
+Total                   14 344 octets
 ```
 
 Les slots inutilisés contiennent des octets aléatoires
@@ -165,7 +168,8 @@ Offset  Taille  Type        Description
 ──────────────────────────────────────────────────────────────────────────
 0       32      [u8; 32]    salt Argon2id (aléatoire, unique par slot)
 32       1      u8          kdf_profile_id (0=interactive, 1=sensitive)
-33      68      VNMB block  K_master chiffré (32 octets en clair → 68 octets)
+33      80      VNMB block  K_master chiffré (32 octets → 80 avec XChaCha20)
+                            (68 octets pour AES-256-GCM, reste zéros)
 ──────────────────────────────────────────────────────────────────────────
 ```
 
@@ -189,7 +193,8 @@ Offset  Taille  Type        Description
 ──────────────────────────────────────────────────────────────────────────
 0       32      [u8; 32]    x25519_eph_pk — clé publique éphémère X25519
 32    1 568      [u8; 1568]  mlkem_ct — chiffré ML-KEM-1024
-1 600   68      VNMB block  K_master chiffré (32 octets en clair → 68 octets)
+1 600   80      VNMB block  K_master chiffré (32 octets → 80 avec XChaCha20)
+                            (68 octets pour AES-256-GCM, reste zéros)
 ──────────────────────────────────────────────────────────────────────────
 ```
 
@@ -204,7 +209,8 @@ hybrid_key    = SHA-256(
     ‖ x25519_eph_pk    (32 B)
     ‖ mlkem_ct         (1568 B)
 )
-K_master = AEAD_decrypt(hybrid_key, slot[1600..1668], aad=b"vnm:key:v1")
+K_master = AEAD_decrypt(hybrid_key, slot[1600..1680], aad=b"vnm:key:v1")
+           (slice [1600..1668] for AES-256-GCM)
 ```
 
 ---
@@ -228,16 +234,16 @@ Total = 36 + P octets
 
 Tailles de blocs courants :
 
-| Plaintext (P)  | Bloc total | Utilisation                     |
-|---------------:|----------:|----------------------------------|
-|         32 B   |     68 B  | K_master dans un slot destinataire |
-|        396 B   |    432 B  | Corps de l'en-tête               |
-|       ≤ 32 732 B | ≤ 32 768 B | Payload d'un slot de données   |
-|         96 B   |    132 B  | Clé privée protégée (.key)       |
+| Plaintext (P)  | Bloc (XChaCha20) | Bloc (AES-256-GCM) | Utilisation                     |
+|---------------:|----------------:|------------------:|----------------------------------|
+|         32 B   |         80 B    |          68 B     | K_master dans un slot destinataire |
+|        396 B   |        444 B    |         432 B     | Corps de l'en-tête               |
+|       ≤ 32 720 B | ≤ 32 768 B    |      ≤ 32 768 B   | Payload d'un slot de données     |
+|         96 B   |        144 B    |         132 B     | Clé privée protégée (.key)       |
 
 ---
 
-## 5. Zone de données (à partir de l'offset 15 176)
+## 5. Zone de données (à partir de l'offset 15 368)
 
 ### 5.1 Slot de données (32 768 octets)
 
@@ -469,10 +475,14 @@ Algorithme : Argon2id, version 0x13 (NIST SP 800-232).
 
 ### 7.2 Chiffrement authentifié (AEAD)
 
-| cipher_id | Algorithme          | Taille clé | Taille nonce | Tag  |
-|----------:|---------------------|:----------:|:------------:|:----:|
-| 0         | ChaCha20-Poly1305   | 256 bits   | 96 bits      | 128 bits |
-| 1         | AES-256-GCM         | 256 bits   | 96 bits      | 128 bits |
+| cipher_id | Algorithme            | Taille clé | Taille nonce | Tag      |
+|----------:|-----------------------|:----------:|:------------:|:--------:|
+| 0         | XChaCha20-Poly1305    | 256 bits   | **192 bits** | 128 bits |
+| 1         | AES-256-GCM           | 256 bits   | 96 bits      | 128 bits |
+
+XChaCha20-Poly1305 est le chiffre par défaut. Son nonce de 192 bits rend la
+probabilité de collision avec des nonces aléatoires négligeable (borne
+d'anniversaire à 2⁹⁶ ≈ 10²⁸ opérations, contre 2⁴⁸ pour un nonce 96 bits).
 
 Le nonce est généré aléatoirement à chaque écriture (non incrémental).
 

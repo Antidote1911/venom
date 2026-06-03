@@ -76,7 +76,7 @@ pub extern "C" fn vnm_container_create(
     let Some(path_s) = cstr(path) else { set_error("null path", error_out); return std::ptr::null_mut(); };
     let pw_s    = cstr_or(password, "");
     let label_s = cstr(label);
-    let alg     = if cipher == 1 { CipherAlgorithm::Aes256Gcm } else { CipherAlgorithm::ChaCha20Poly1305 };
+    let alg     = if cipher == 1 { CipherAlgorithm::Aes256Gcm } else { CipherAlgorithm::XChaCha20Poly1305 };
     let prof    = if kdf_profile == 1 { "sensitive" } else { "interactive" };
     let lbl_opt = label_s.filter(|s| !s.is_empty()).map(|s| s.to_string());
 

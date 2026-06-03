@@ -29,7 +29,7 @@ indistinguishable from encrypted data, enabling plausible deniability.
 | **Encryption mode** | XTS-AES (no integrity) | AEAD per slot (AES-256-GCM / ChaCha20-Poly1305) |
 | **Per-block authentication** | ✗ silent corruption possible | ✓ 128-bit tag, decryption fails on tampering |
 | **Slot-swap / relocation attack** | ✗ | ✓ slot index as AAD |
-| **Nonce** | Deterministic (sector number) | Random 96-bit per write |
+| **Nonce** | Deterministic (sector number) | Random **192-bit** per write (XChaCha20) |
 | **KDF** | PBKDF2-SHA512 | Argon2id (memory-hard, RFC 9106) |
 | **GPU/ASIC resistance** | ✗ CPU-bound only | ✓ 64–256 MiB RAM required per guess |
 | **Post-quantum recipients** | ✗ | ✓ X25519 + ML-KEM-1024 (NIST FIPS 203) |

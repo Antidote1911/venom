@@ -16,15 +16,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CipherAlgorithm {
-    ChaCha20Poly1305 = 0,
-    Aes256Gcm        = 1,
+    XChaCha20Poly1305 = 0,
+    Aes256Gcm         = 1,
 }
 
 impl CipherAlgorithm {
     pub fn as_str(self) -> &'static str {
         match self {
-            CipherAlgorithm::ChaCha20Poly1305 => "chacha20-poly1305",
-            CipherAlgorithm::Aes256Gcm        => "aes-256-gcm",
+            CipherAlgorithm::XChaCha20Poly1305 => "xchacha20-poly1305",
+            CipherAlgorithm::Aes256Gcm         => "aes-256-gcm",
         }
     }
 }

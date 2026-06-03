@@ -44,7 +44,7 @@ use rand::RngCore;
 
 use crate::{Result, VnmError};
 use crate::container::{CipherAlgorithm, kdf_params_for_profile};
-use crate::crypto::{encrypt_block, decrypt_block};
+use crate::crypto::{encrypt_block, decrypt_block, vnmb_header_len};
 
 pub const HEADER_SIZE:        usize = 512;
 pub const HEADER_REGION_SIZE: u64   = 1024;
@@ -53,14 +53,14 @@ pub const SLOT_SIZE:          usize = 32_768;
 // Recipient area constants (fixed layout — no need to move data when adding/removing recipients)
 pub const MAX_PASSWORD_SLOTS: usize = 8;
 pub const MAX_KEY_SLOTS:      usize = 8;
-pub const PW_SLOT_SIZE:       usize = super::recipient::PW_SLOT_SIZE;   // 101
-pub const KEY_SLOT_SIZE:      usize = super::recipient::KEY_SLOT_SIZE;  // 1644
+pub const PW_SLOT_SIZE:       usize = super::recipient::PW_SLOT_SIZE;   // 113
+pub const KEY_SLOT_SIZE:      usize = super::recipient::KEY_SLOT_SIZE;  // 1680
 pub const RECIPIENT_AREA_SIZE: usize = MAX_PASSWORD_SLOTS * PW_SLOT_SIZE + MAX_KEY_SLOTS * KEY_SLOT_SIZE;
-// = 8 * 101 + 8 * 1644 = 808 + 13152 = 13960
+// = 8 * 113 + 8 * 1680 = 904 + 13440 = 14344
 
 /// Byte offset where slot 0 starts.
 pub const DATA_AREA_OFFSET: u64 = HEADER_REGION_SIZE + RECIPIENT_AREA_SIZE as u64;
-// = 1024 + 13960 = 14984
+// = 1024 + 14344 = 15368
 
 pub const MAGIC:          &[u8; 4] = b"VNM1";
 pub const FORMAT_VERSION: u32      = 1;
@@ -68,8 +68,13 @@ pub const FORMAT_VERSION: u32      = 1;
 const SALT_LEN:     usize = 64;
 const BODY_OFFSET:  usize = 68;   // after salt(64) + cipher(1) + profile(1) + n_pw(1) + n_key(1) = 68
 pub(crate) const BODY_LEN: usize = 396;
-/// Size of the VNMB-encrypted header body on disk (36 VNMB header + 396 plaintext + 16 tag).
-pub(crate) const ENC_BODY_SIZE: usize = 36 + BODY_LEN; // = 432
+
+/// Size of the VNMB-encrypted header body on disk for a given cipher.
+/// XChaCha20-Poly1305: 32 (VNMB header) + 396 (body) + 16 (tag) = 444
+/// AES-256-GCM:        20 (VNMB header) + 396 (body) + 16 (tag) = 432
+pub(crate) fn enc_body_size(cipher: CipherAlgorithm) -> usize {
+    vnmb_header_len(cipher) + BODY_LEN + 16
+}
 
 const AAD_OUTER:  &[u8] = b"vnm:header:outer:v1";
 const AAD_HIDDEN: &[u8] = b"vnm:header:hidden:v1";
@@ -142,14 +147,14 @@ pub fn decode_header(
     let num_key    = raw[67];
 
     let cipher = match cipher_id {
-        0 => CipherAlgorithm::ChaCha20Poly1305,
+        0 => CipherAlgorithm::XChaCha20Poly1305,
         1 => CipherAlgorithm::Aes256Gcm,
         _ => return Err(VnmError::InvalidFormat(format!("unknown cipher {cipher_id}"))),
     };
 
     let aad  = if is_hidden { AAD_HIDDEN } else { AAD_OUTER };
     // Pass exactly the encrypted blob bytes — not the full tail — so the AEAD tag is at the right position.
-    let body = decrypt_block(k_master, cipher, aad, &raw[BODY_OFFSET..BODY_OFFSET + ENC_BODY_SIZE])
+    let body = decrypt_block(k_master, cipher, aad, &raw[BODY_OFFSET..BODY_OFFSET + enc_body_size(cipher)])
         .map_err(|_| VnmError::AuthenticationFailed)?;
 
     if body.len() < 112 { return Err(VnmError::InvalidFormat("header body too short".into())); }
@@ -173,7 +178,7 @@ pub fn decode_header(
 pub fn read_header_plaintext(raw: &[u8; HEADER_SIZE]) -> (CipherAlgorithm, u8, u8, u8) {
     let cipher = match raw[64] {
         1 => CipherAlgorithm::Aes256Gcm,
-        _ => CipherAlgorithm::ChaCha20Poly1305,
+        _ => CipherAlgorithm::XChaCha20Poly1305,
     };
     (cipher, raw[65], raw[66], raw[67])
 }
