@@ -50,7 +50,7 @@ pub struct SlotStore {
 impl SlotStore {
     pub fn new(
         file: std::fs::File,
-        master_key: [u8; 32],
+        master_key: LockedMemory<[u8; 32]>,
         cipher: CipherAlgorithm,
         slot_start: u64,
         slot_limit: u64,
@@ -59,7 +59,7 @@ impl SlotStore {
     ) -> Self {
         Self {
             file: Mutex::new(file),
-            master_key: LockedMemory::new(master_key),
+            master_key,
             cipher,
             slot_start,
             slot_limit,

@@ -61,3 +61,16 @@ impl<T: Zeroize> Deref for LockedMemory<T> {
     type Target = T;
     fn deref(&self) -> &T { &self.inner }
 }
+
+impl<T: Zeroize> std::ops::DerefMut for LockedMemory<T> {
+    fn deref_mut(&mut self) -> &mut T { &mut self.inner }
+}
+
+/// Clone by creating a second independently locked allocation.
+/// A temporary stack copy exists during the clone — unavoidable without
+/// OS-level copy-on-write support for locked pages.
+impl<T: Zeroize + Copy> Clone for LockedMemory<T> {
+    fn clone(&self) -> Self {
+        Self::new(**self)
+    }
+}

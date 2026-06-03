@@ -71,6 +71,54 @@ pub fn encrypt_block(key: &[u8; 32], cipher: CipherAlgorithm, aad: &[u8], plaint
     Ok(buf)
 }
 
+/// Decrypt a VNMB block whose plaintext is exactly 32 bytes, writing the
+/// result directly into `out` without any intermediate heap allocation.
+///
+/// Used to decrypt K_master directly into a `LockedMemory<[u8; 32]>` buffer,
+/// ensuring the key is never materialised as an unprotected stack or heap value.
+pub fn decrypt_block_into_32(
+    key:    &[u8; 32],
+    cipher: CipherAlgorithm,
+    aad:    &[u8],
+    data:   &[u8],
+    out:    &mut [u8; 32],
+) -> crate::Result<()> {
+    let nlen = nonce_len(cipher);
+    let hlen = NONCE_OFFSET + nlen;
+    let expected = hlen + 32 + 16;
+
+    if data.len() != expected { return Err(crate::VnmError::AuthenticationFailed); }
+    if &data[0..4] != MAGIC   { return Err(crate::VnmError::AuthenticationFailed); }
+    let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    if version != VERSION {
+        return Err(crate::VnmError::InvalidFormat(format!("unknown VNMB block version {version}")));
+    }
+
+    let nonce_bytes = &data[NONCE_OFFSET..NONCE_OFFSET + nlen];
+    out.copy_from_slice(&data[hlen..hlen + 32]); // copy ciphertext into out
+    let tag_bytes = &data[hlen + 32..];
+
+    match cipher {
+        CipherAlgorithm::XChaCha20Poly1305 => {
+            use chacha20poly1305::{KeyInit as _, aead::AeadInPlace as _, Tag};
+            let c = XChaCha20Poly1305::new_from_slice(key).map_err(|e| crate::VnmError::CipherError(e.to_string()))?;
+            let n = XNonce::from_slice(nonce_bytes);
+            let t = Tag::from_slice(tag_bytes);
+            c.decrypt_in_place_detached(n, aad, out.as_mut_slice(), t)
+             .map_err(|_| crate::VnmError::AuthenticationFailed)?;
+        }
+        CipherAlgorithm::Aes256Gcm => {
+            use aes_gcm::aead::{AeadInPlace as _, Tag};
+            let c = Aes256GcmN16::new_from_slice(key).map_err(|e| crate::VnmError::CipherError(e.to_string()))?;
+            let n = GenericArray::<u8, AesN16>::from_slice(nonce_bytes);
+            let t = Tag::<Aes256GcmN16>::from_slice(tag_bytes);
+            c.decrypt_in_place_detached(n, aad, out.as_mut_slice(), t)
+             .map_err(|_| crate::VnmError::AuthenticationFailed)?;
+        }
+    }
+    Ok(())
+}
+
 /// Decrypt a VNMB block. Returns plaintext.
 pub fn decrypt_block(key: &[u8; 32], cipher: CipherAlgorithm, aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     let nlen = nonce_len(cipher);

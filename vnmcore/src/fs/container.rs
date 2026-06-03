@@ -266,8 +266,8 @@ impl VnmContainer {
         }
         // Remaining slots stay as random bytes (already filled in step 1)
 
-        // 5. Init outer slot store
-        let outer_store = open_store(path, k_outer, cipher, 0, outer_slots, OUTER_ALLOC_SLOT, true)?;
+        // 5. Init outer slot store (clone k_outer: one copy for the store, one for k_master)
+        let outer_store = open_store(path, k_outer.clone(), cipher, 0, outer_slots, OUTER_ALLOC_SLOT, true)?;
         outer_store.rebuild_free_list();
         { outer_store.free.lock().unwrap().retain(|&s| s != OUTER_ROOT_SLOT); }
         write_empty_dir(&outer_store, OUTER_ROOT_SLOT)?;
@@ -285,7 +285,7 @@ impl VnmContainer {
             outer_limit:  outer_slots,
             label,
             created_at:   now,
-            k_master:     LockedMemory::new(k_outer),
+            k_master:     k_outer,
             path:         path.to_path_buf(),
             container_id: outer_container_id,
         })
@@ -335,7 +335,7 @@ impl VnmContainer {
                 if let Ok(raw) = read_512_at(path, off) {
                     if let Ok(meta) = decode_header(&raw, &k, false) {
                         let has_gen = meta.container_id != [0u8; 16];
-                        let store = open_store(path, k, meta.cipher, 0, meta.outer_slots, OUTER_ALLOC_SLOT, has_gen)?;
+                        let store = open_store(path, k.clone(), meta.cipher, 0, meta.outer_slots, OUTER_ALLOC_SLOT, has_gen)?;
                         store.load_free_list()?;
                         // Anti-rollback check
                         if has_gen {
@@ -349,7 +349,7 @@ impl VnmContainer {
                             outer_limit:  meta.outer_slots,
                             label:        label_from(meta.label),
                             created_at:   meta.created_at,
-                            k_master:     LockedMemory::new(k),
+                            k_master:     k,
                             store,
                             path:         path.to_path_buf(),
                             container_id: meta.container_id,
@@ -370,7 +370,7 @@ impl VnmContainer {
                 let hid_end   = hid_start + meta.outer_slots;
                 let hid_alloc = hid_end - 1;
                 let has_gen   = meta.container_id != [0u8; 16];
-                let store = open_store(path, k, meta.cipher, hid_start, hid_end, hid_alloc, has_gen)?;
+                let store = open_store(path, k.clone(), meta.cipher, hid_start, hid_end, hid_alloc, has_gen)?;
                 store.load_free_list()?;
                 // Anti-rollback check
                 if has_gen {
@@ -384,7 +384,7 @@ impl VnmContainer {
                     outer_limit:  hid_start,
                     label:        label_from(meta.label),
                     created_at:   meta.created_at,
-                    k_master:     LockedMemory::new(k),
+                    k_master:     k,
                     store,
                     path:         path.to_path_buf(),
                     container_id: meta.container_id,
@@ -510,13 +510,16 @@ impl VnmContainer {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn new_k_master() -> [u8; 32] {
-    let mut k = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut k);
-    k
+/// Generate a fresh random K_master directly into a locked heap allocation.
+/// The random bytes are never placed on the stack — zeros are initialised
+/// first (not sensitive), then overwritten in place with random data.
+fn new_k_master() -> LockedMemory<[u8; 32]> {
+    let mut lm = LockedMemory::new([0u8; 32]);
+    rand::thread_rng().fill_bytes(&mut *lm);
+    lm
 }
 
-fn open_store(path: &Path, k: [u8; 32], c: CipherAlgorithm, s: u64, l: u64, a: u64, has_gen: bool) -> Result<SlotStore> {
+fn open_store(path: &Path, k: LockedMemory<[u8; 32]>, c: CipherAlgorithm, s: u64, l: u64, a: u64, has_gen: bool) -> Result<SlotStore> {
     let f = OpenOptions::new().read(true).write(true).open(path)?;
     Ok(SlotStore::new(f, k, c, s, l, a, has_gen))
 }
@@ -573,8 +576,8 @@ fn write_key_slot_raw(path: &Path, j: usize, slot: &[u8; KEY_SLOT_SIZE]) -> Resu
     write_bytes_at(path, key_slot_offset(j), slot)
 }
 
-/// Try all password slots with the given password.  Returns K_master on success.
-fn try_pw_slots(path: &Path, pw: &[u8], n: u8, cipher: CipherAlgorithm) -> Option<[u8; 32]> {
+/// Try all password slots with the given password.  Returns K_master (locked) on success.
+fn try_pw_slots(path: &Path, pw: &[u8], n: u8, cipher: CipherAlgorithm) -> Option<LockedMemory<[u8; 32]>> {
     for i in 0..n as usize {
         let slot = read_pw_slot_raw(path, i).ok()?;
         if let Some(k) = try_password_slot(&slot, pw, cipher) { return Some(k); }
@@ -590,8 +593,8 @@ fn read_pw_slot_raw(path: &Path, i: usize) -> Result<[u8; PW_SLOT_SIZE]> {
     Ok(buf)
 }
 
-/// Try all ML-KEM slots with the given seed.  Returns K_master on success.
-fn try_key_slots(path: &Path, private: &HybridPrivateKey, n: u8, cipher: CipherAlgorithm) -> Option<[u8; 32]> {
+/// Try all ML-KEM slots with the given private key.  Returns K_master (locked) on success.
+fn try_key_slots(path: &Path, private: &HybridPrivateKey, n: u8, cipher: CipherAlgorithm) -> Option<LockedMemory<[u8; 32]>> {
     for j in 0..n as usize {
         let slot = read_key_slot_raw(path, j).ok()?;
         if let Some(k) = try_key_slot(&slot, private, cipher) { return Some(k); }
@@ -621,17 +624,21 @@ fn update_slot_counts(
 }
 
 /// Try to open a hidden volume from a specific header offset.
-/// Returns (K_master, HeaderPayload) on success, None on wrong password or corruption.
-fn try_hidden_at(path: &Path, hdr_offset: u64, password: &[u8]) -> Option<([u8; 32], HeaderPayload)> {
-    let raw = read_512_at(path, hdr_offset).ok()?;
-    let k   = derive_hidden_key(&raw, password).ok()?;
-    let meta = decode_header(&raw, &k, true).ok()?;
+/// Returns (K_master locked, HeaderPayload) on success, None otherwise.
+fn try_hidden_at(path: &Path, hdr_offset: u64, password: &[u8]) -> Option<(LockedMemory<[u8; 32]>, HeaderPayload)> {
+    let raw  = read_512_at(path, hdr_offset).ok()?;
+    let k    = derive_hidden_key(&raw, password).ok()?;
+    let meta = decode_header(&raw, &*k, true).ok()?;
     Some((k, meta))
 }
 
-/// Derive the hidden-header encryption key directly from the password (hidden volumes
-/// use a password-derived key for the header, like V2, to avoid a separate recipient area).
-fn derive_hidden_key(raw: &[u8; 512], password: &[u8]) -> Result<[u8; 32]> {
+/// Derive the hidden-header encryption key from the password.
+///
+/// The derived key is copied from the Argon2id output Vec directly into a
+/// `LockedMemory<[u8; 32]>` allocation, so K_hidden never appears on the stack
+/// as a plain array.  The source Vec is dropped (and zeroized via ZeroizeOnDrop
+/// on DerivedKey) immediately after the copy.
+fn derive_hidden_key(raw: &[u8; 512], password: &[u8]) -> Result<LockedMemory<[u8; 32]>> {
     use crate::crypto::derive_key;
     use crate::container::kdf_params_for_profile;
     let salt        = &raw[0..64];
@@ -639,7 +646,11 @@ fn derive_hidden_key(raw: &[u8; 512], password: &[u8]) -> Result<[u8; 32]> {
     let mut kdf = kdf_params_for_profile(if kdf_profile == 1 { "sensitive" } else { "interactive" });
     kdf.salt = hex::encode(salt);
     let dk = derive_key(password, &kdf)?;
-    Ok(dk.as_array_32().unwrap())
+    let src = dk.as_bytes();
+    if src.len() != 32 { return Err(VnmError::KdfError("unexpected key length".into())); }
+    let mut lm = LockedMemory::new([0u8; 32]);
+    lm.copy_from_slice(src);   // heap Vec → locked heap, no stack intermediary
+    Ok(lm)
 }
 
 /// Encode a hidden header using a password-derived key (not K_master).
