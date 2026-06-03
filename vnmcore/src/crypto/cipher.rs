@@ -4,7 +4,8 @@ use aes_gcm::aes::Aes256;
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use deoxys::DeoxysII256;
 use serpent::Serpent;
-use ctr::{Ctr128BE, cipher::{KeyIvInit, StreamCipher}};
+use cipher::{BlockCipherEncrypt, KeyInit as SerpentInit};
+use hybrid_array::{Array, typenum::U16 as HU16};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use rand::RngCore;
@@ -90,8 +91,8 @@ fn derive_subkey_16(k_master: &[u8; 32], label: &[u8]) -> [u8; 16] {
 
 struct TripleKeys {
     k1:     [u8; 32],  // XChaCha20-Poly1305  (256-bit)
-    k2:     [u8; 32],  // DeoxysII256          (256-bit; DeoxysBc384 = 256-bit key + 128-bit tweak)
-    k3_enc: [u8; 16],  // Serpent-128-CTR      (128-bit; Serpent::KeySize = U16)
+    k2:     [u8; 32],  // DeoxysII256          (256-bit)
+    k3_enc: [u8; 32],  // Serpent-256-CTR      (256-bit via new_from_slice, manual CTR)
     k3_mac: [u8; 32],  // HMAC-SHA256          (256-bit)
 }
 
@@ -99,20 +100,32 @@ fn derive_triple_keys(k_master: &[u8; 32]) -> TripleKeys {
     TripleKeys {
         k1:     derive_subkey_32(k_master, b"\x01venom:triple:xchacha20"),
         k2:     derive_subkey_32(k_master, b"\x02venom:triple:deoxys"),
-        k3_enc: derive_subkey_16(k_master, b"\x03venom:triple:serpent:enc"),
+        k3_enc: derive_subkey_32(k_master, b"\x03venom:triple:serpent:enc"),
         k3_mac: derive_subkey_32(k_master, b"\x04venom:triple:serpent:mac"),
     }
 }
 
 // ── Serpent-CTR + HMAC-SHA256 helpers ────────────────────────────────────────
 
-/// Apply Serpent-256 in CTR mode (in place).
-/// Uses `new_from_slices` to bypass the U16 KeySize constraint
-/// and pass a 32-byte key directly.
-fn serpent_ctr_apply(key: &[u8; 16], nonce: &[u8; N3], data: &mut [u8]) -> Result<()> {
-    let mut ctr = Ctr128BE::<Serpent>::new_from_slices(key, nonce)
-        .map_err(|e| VnmError::CipherError(format!("Serpent-CTR init: {e}")))?;
-    ctr.apply_keystream(data);
+/// Apply Serpent-256 in CTR mode (in place) using a 32-byte key.
+///
+/// `Serpent::new_from_slice` accepts 16–32 bytes (variable key length).
+/// `Ctr128BE::new_from_slices` rejects 32-byte keys because `KeySizeUser::KeySize = U16`.
+/// We therefore construct the cipher directly and implement CTR manually using
+/// `BlockEncrypt::encrypt_block_inplace` on each 16-byte counter block.
+fn serpent_ctr_apply(key: &[u8; 32], nonce: &[u8; N3], data: &mut [u8]) -> Result<()> {
+    let cipher = <Serpent as SerpentInit>::new_from_slice(key.as_ref())
+        .map_err(|e| VnmError::CipherError(format!("Serpent-256 init: {e}")))?;
+    let mut ctr = u128::from_be_bytes(*nonce);
+    for chunk in data.chunks_mut(16) {
+        let mut block: Array<u8, HU16> = ctr.to_be_bytes().into();
+        cipher.encrypt_block(&mut block);
+        let keystream: [u8; 16] = block.into();
+        for (d, k) in chunk.iter_mut().zip(keystream.iter()) {
+            *d ^= k;
+        }
+        ctr = ctr.wrapping_add(1);
+    }
     Ok(())
 }
 
