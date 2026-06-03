@@ -7,16 +7,18 @@
 //!
 //! ## Shared-secret derivation
 //!
-//!   hybrid_key = SHA-256(
-//!       "venom:hybrid:v1"   ← domain separator
-//!       || x25519_shared    ← 32 bytes (ECDH result)
-//!       || mlkem_ss         ← 32 bytes (ML-KEM shared secret)
-//!       || x25519_eph_pk    ← 32 bytes (ephemeral public, binds ciphertext)
-//!       || mlkem_ct         ← 1568 bytes (ML-KEM ciphertext, binds ciphertext)
+//!   hybrid_key = BLAKE3_derive_key(
+//!       context  = "venom:hybrid:v1"   ← BLAKE3 domain separator (hashed with distinct IV)
+//!       material = x25519_shared    (32 B)
+//!                || mlkem_ss         (32 B)
+//!                || x25519_eph_pk    (32 B, binds ciphertext)
+//!                || mlkem_ct         (1568 B, binds ciphertext)
 //!   )
 //!
-//! The ciphertexts are included in the hash to prevent key-commitment attacks
-//! and ensure the hybrid_key is bound to the specific encapsulation.
+//! The ciphertexts are included to prevent key-commitment attacks and ensure
+//! the hybrid_key is bound to the specific encapsulation.
+//! BLAKE3's derive_key() hashes the context string with a distinct IV, providing
+//! stronger domain separation than prepending a label to a plain hash input.
 
 use sha2::{Sha256, Digest};
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519Pub, StaticSecret};
@@ -129,18 +131,17 @@ pub fn decapsulate(
     Ok(combine(&x25519_shared, &mlkem_ss, x25519_eph_pk, mlkem_ct))
 }
 
-/// SHA-256 domain-separated combination of the two shared secrets.
+/// BLAKE3 domain-separated combination of the two shared secrets.
 fn combine(
     x25519_ss:  &[u8; 32],
     mlkem_ss:   &[u8; 32],
     eph_pk:     &[u8; 32],
     mlkem_ct:   &[u8; CT_SIZE],
 ) -> [u8; 32] {
-    let mut h = Sha256::new();
-    h.update(b"venom:hybrid:v1");
-    h.update(x25519_ss);
-    h.update(mlkem_ss);
-    h.update(eph_pk);
-    h.update(mlkem_ct.as_ref());
-    h.finalize().into()
+    let mut ikm = Vec::with_capacity(32 + 32 + 32 + CT_SIZE);
+    ikm.extend_from_slice(x25519_ss);
+    ikm.extend_from_slice(mlkem_ss);
+    ikm.extend_from_slice(eph_pk);
+    ikm.extend_from_slice(mlkem_ct.as_ref());
+    blake3::derive_key("venom:hybrid:v1", &ikm)
 }

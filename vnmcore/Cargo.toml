@@ -31,7 +31,6 @@ thiserror         = { workspace = true }
 anyhow            = { workspace = true }
 hex               = { workspace = true }
 sha2              = { workspace = true }
-hmac              = { workspace = true }
 serde_bytes       = { workspace = true }
 
 # Unix: mlock (key memory protection) + FUSE

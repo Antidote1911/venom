@@ -9,8 +9,6 @@ use eax::Eax;
 use serpent::Serpent;
 use cipher::{BlockCipherEncrypt, BlockCipherEncClosure, KeyInit as SerpentInit, KeySizeUser, BlockSizeUser, ParBlocksSizeUser};
 use hybrid_array::typenum::U16 as HU16;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use rand::RngCore;
 use crate::{Result, VnmError};
 use crate::container::CipherAlgorithm;
@@ -100,10 +98,9 @@ pub fn vnmb_header_len(cipher: CipherAlgorithm) -> usize {
 
 // ── Triple cipher key schedule ────────────────────────────────────────────────
 
-fn derive_subkey_32(k_master: &[u8; 32], label: &[u8]) -> [u8; 32] {
-    let mut mac = <Hmac<Sha256>>::new_from_slice(k_master).expect("HMAC accepts any key");
-    mac.update(label);
-    mac.finalize().into_bytes().into()
+/// Derive a 32-byte subkey from `k_master` using BLAKE3 domain-separated key derivation.
+fn derive_subkey_32(k_master: &[u8; 32], context: &str) -> [u8; 32] {
+    blake3::derive_key(context, k_master)
 }
 
 struct TripleKeys {
@@ -114,9 +111,9 @@ struct TripleKeys {
 
 fn derive_triple_keys(k_master: &[u8; 32]) -> TripleKeys {
     TripleKeys {
-        k1: derive_subkey_32(k_master, b"\x01venom:triple:xchacha20"),
-        k2: derive_subkey_32(k_master, b"\x02venom:triple:deoxys"),
-        k3: derive_subkey_32(k_master, b"\x03venom:triple:serpent"),
+        k1: derive_subkey_32(k_master, "venom:triple:xchacha20"),
+        k2: derive_subkey_32(k_master, "venom:triple:deoxys"),
+        k3: derive_subkey_32(k_master, "venom:triple:serpent"),
     }
 }
 
