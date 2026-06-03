@@ -125,11 +125,18 @@ MainWindow::MainWindow(QWidget* parent)
     ui->listKeys->setAcceptDrops(true);
     ui->listKeys->installEventFilter(this);
 
-    // Refresh key lists whenever a relevant tab is shown
+    // Refresh lists whenever a relevant tab is shown
     connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int idx){
-        if (idx == 0) refreshMountKeyList();
+        if (idx == 0) { refreshDiscoveredVaults(); refreshMountKeyList(); }
         if (idx == 1) refreshCreateKeyList();
         if (idx == 2) refreshKeyList();
+    });
+
+    // Double-click on a discovered vault → pre-fill Mount form and switch tab
+    connect(ui->listDiscovered, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+        const QString path = item->data(Qt::UserRole).toString();
+        ui->leVaultPath->setText(path);
+        ui->tabWidget->setCurrentIndex(0); // stay on Vaults tab; Mount section is below
     });
 
     // When a local key is selected, clear the external path field to avoid ambiguity
@@ -147,6 +154,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_core, &VenomCore::errorOccurred,    this, &MainWindow::onError);
 
     refreshVaultList();
+    refreshDiscoveredVaults();
 }
 
 MainWindow::~MainWindow() { delete ui; }
@@ -177,6 +185,33 @@ void MainWindow::removeVaultCard(const QString& mountpoint)
         }
     }
     refreshVaultList();
+}
+
+void MainWindow::refreshDiscoveredVaults()
+{
+    // Collect currently mounted vault paths to exclude them
+    QStringList mountedPaths;
+    for (const auto& mc : m_core->mountedContainers())
+        mountedPaths << QFileInfo(mc.vaultPath).canonicalFilePath();
+
+    // Scan default container directory
+    QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    if (docs.isEmpty()) docs = QDir::homePath();
+    const QDir dir(docs + QStringLiteral("/venom/"));
+
+    ui->listDiscovered->clear();
+    const auto entries = dir.entryInfoList({QStringLiteral("*.vnm")}, QDir::Files, QDir::Name);
+    for (const auto& fi : entries) {
+        if (mountedPaths.contains(fi.canonicalFilePath())) continue;
+        auto* item = new QListWidgetItem(fi.fileName());
+        item->setData(Qt::UserRole, fi.absoluteFilePath());
+        item->setToolTip(fi.absoluteFilePath());
+        ui->listDiscovered->addItem(item);
+    }
+
+    const bool hasEntries = ui->listDiscovered->count() > 0;
+    ui->listDiscovered->setVisible(hasEntries);
+    ui->lblDiscoveredEmpty->setVisible(!hasEntries);
 }
 
 // ── Key lists ─────────────────────────────────────────────────────────────────
@@ -450,6 +485,7 @@ void MainWindow::onDeleteKey()
 void MainWindow::onMountStarted(const MountedContainer& info)
 {
     addVaultCard(info);
+    refreshDiscoveredVaults(); // remove newly-mounted vault from the discovered list
     ui->tabWidget->setCurrentIndex(0);
     statusBar()->showMessage(QStringLiteral("Mounted: ") + info.mountpoint, 5000);
 }
@@ -458,6 +494,7 @@ void MainWindow::onMountGone(const QString& mp)
 {
     removeVaultCard(mp);
     statusBar()->showMessage(QStringLiteral("Unmounted: ") + mp, 4000);
+    refreshDiscoveredVaults();
     // Reset mount form fields so the next vault auto-fills the mountpoint
     m_mountpointManual = false;
     ui->leVaultPath->clear();
@@ -472,6 +509,7 @@ void MainWindow::onMountError(const QString&, const QString& error)
 void MainWindow::onContainerCreated(const QString& path)
 {
     statusBar()->showMessage(QStringLiteral("Container created: ") + path, 5000);
+    refreshDiscoveredVaults();
     // Clear create form and reset path to auto-mode for next container
     m_containerPathManual = false;
     ui->leLabel->clear();  // triggers textChanged → resets lePath to default

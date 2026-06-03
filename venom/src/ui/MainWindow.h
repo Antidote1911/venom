@@ -45,6 +45,7 @@ private slots:
 
 private:
     void refreshVaultList();
+    void refreshDiscoveredVaults();
     void addVaultCard(const MountedContainer& info);
     void removeVaultCard(const QString& mountpoint);
     void refreshKeyList();
