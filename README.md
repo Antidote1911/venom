@@ -37,7 +37,7 @@ indistinguishable from encrypted data, enabling plausible deniability.
 | **Recipient anonymity** | N/A | ✓ no plaintext fingerprint in container |
 | **Hidden volumes** | ✓ | ✓ |
 | **Forward secrecy (deleted files)** | ✗ ciphertext remains on disk | ✓ slot wiped with random bytes on free |
-| **Header backup** | ✓ redundant copy | ✗ single header (planned) |
+| **Header backup** | ✓ redundant copy | ✓ outer at [512..1024], hidden at EOF-1024 |
 | **Cipher cascades** | ✓ AES-Twofish-Serpent… | ✗ one cipher per container |
 | **Inner filesystem** | FAT / exFAT / ext4 / NTFS | Custom VaultNode (msgpack) |
 | **Single-file container** | ✓ | ✓ |

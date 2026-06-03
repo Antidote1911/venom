@@ -12,13 +12,18 @@ d'octets aléatoires cryptographiquement sûrs (deniabilité plausible).
 ```
 Offset          Taille          Description
 ─────────────────────────────────────────────────────────────────────────────
-0               512             En-tête extérieur (chiffré)
-512             512             Réservé (octets aléatoires)
-1 024           14 216          Zone destinataires (password slots + key slots)
-15 240          N × 32 768      Zone de données (N slots de 32 768 octets)
-EOF − 512       512             En-tête caché (ou octets aléatoires si absent)
+0               512             En-tête extérieur — primaire (chiffré)
+512             512             En-tête extérieur — backup (copie identique)
+1 024           14 152          Zone destinataires (password slots + key slots)
+15 176          N × 32 768      Zone de données (N slots de 32 768 octets)
+EOF − 1 024     512             En-tête caché — backup  (si volume caché, sinon aléatoire)
+EOF − 512       512             En-tête caché — primaire (si volume caché, sinon aléatoire)
 ─────────────────────────────────────────────────────────────────────────────
 ```
+
+**Taille de queue (tail) :**
+- Conteneur sans volume caché : 512 octets (placeholder aléatoire)
+- Conteneur avec volume caché : 1 024 octets (backup 512 + primaire 512)
 
 Constantes :
 
@@ -505,28 +510,36 @@ l'aveugle pour préserver l'anonymat des destinataires.
 ## 8. Procédure d'ouverture
 
 ```
-1. Lire les 512 premiers octets → en-tête extérieur en clair
-2. Lire cipher_id, kdf_profile, num_password_slots, num_key_slots
-3. Pour chaque password slot [0..num_password_slots) à offset (1024 + i×101) :
-     slot_key = Argon2id(password, salt=slot[0..32], profile=slot[32])
-     K_master = AEAD_decrypt(slot_key, slot[33..101])
-     Si succès → aller en 5
-4. Pour chaque key slot [0..num_key_slots) à offset (1832 + j×1668) :
-     Décapsuler (essai aveugle, pas de fingerprint) → K_master
-     Si succès → aller en 5
-5. Déchiffrer le bloc VNMB [68..500] avec K_master
-     → valider magic b"VNM1", lire outer_slots, root_slot
-6. Accéder aux slots via DATA_AREA_OFFSET + slot_index × SLOT_SIZE
+1. Tenter d'ouvrir l'en-tête extérieur primaire [0..512] :
+     a. Lire cipher_id, kdf_profile, num_password_slots, num_key_slots
+     b. Pour chaque password slot [0..num_password_slots) à offset (1024 + i×101) :
+          slot_key = Argon2id(password, salt=slot[0..32], profile=slot[32])
+          K_master = AEAD_decrypt(slot_key, slot[33..101])
+          Si succès → aller en 1d
+     c. Pour chaque key slot [0..num_key_slots) à offset (1832 + j×1668) :
+          Décapsuler (essai aveugle) → K_master
+          Si succès → aller en 1d
+     d. Déchiffrer le bloc VNMB [68..500] avec K_master → valider magic b"VNM1"
+
+2. Si l'étape 1 échoue (header corrompu) → recommencer avec le backup [512..1024]
+
+3. Si succès : accéder aux slots via DATA_AREA_OFFSET + slot_index × SLOT_SIZE
 ```
 
 Pour le volume caché :
 ```
-1. Lire les 512 derniers octets → en-tête caché
-2. K_hidden = Argon2id(password, salt=hdr[0..64], profile=hdr[65])
-3. Déchiffrer le bloc VNMB [68..500] avec K_hidden
-     → valider magic b"VNM1", lire outer_slots, hidden_start
-4. Slots du volume caché : [hidden_start .. hidden_start + outer_slots)
+1. Tenter d'ouvrir l'en-tête caché primaire [EOF-512..EOF] :
+     K_hidden = Argon2id(password, salt=hdr[0..64], profile=hdr[65])
+     Déchiffrer bloc VNMB → valider magic b"VNM1"
+
+2. Si échec → tenter le backup [EOF-1024..EOF-512]
+
+3. Si succès : slots du volume caché = [hidden_start .. hidden_start + outer_slots)
 ```
+
+La procédure d'ouverture essaie toujours le primaire en premier ; le backup
+n'est utilisé qu'en cas d'échec d'authentification AEAD (corruption physique).
+Un mauvais mot de passe échoue sur les deux et retourne `AuthenticationFailed`.
 
 ---
 

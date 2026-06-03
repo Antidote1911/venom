@@ -45,6 +45,57 @@ fn wrong_password_rejected() {
     std::fs::remove_file(&path).ok();
 }
 
+// ── Header backup / recovery ──────────────────────────────────────────────────
+
+#[test]
+fn backup_header_survives_primary_corruption() {
+    use std::io::{Seek, SeekFrom, Write};
+    let path = tmp("header_backup");
+    let _ = std::fs::remove_file(&path);
+    VnmContainer::create(&path, b"password", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
+        "interactive", Some("backup test".into()), None).unwrap();
+
+    // Corrupt the primary outer header (first 512 bytes) with zeros
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&[0u8; 512]).unwrap();
+    }
+
+    // Container must still open using the backup header at [512..1024]
+    let c = VnmContainer::open(&path, OpenCredential::Password(b"password")).unwrap();
+    assert_eq!(c.label.as_deref(), Some("backup test"));
+    assert!(!c.is_hidden);
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn hidden_backup_header_survives_primary_corruption() {
+    use std::io::{Seek, SeekFrom, Write};
+    let path = tmp("hidden_backup");
+    let _ = std::fs::remove_file(&path);
+    VnmContainer::create(&path, b"outer", 8*MB, CipherAlgorithm::ChaCha20Poly1305,
+        "interactive", Some("Outer".into()),
+        Some(vnmcore::fs::container::HiddenVolumeOptions {
+            password: b"hidden", size_bytes: 2*MB,
+            label: Some("Hidden".into()), kdf_profile: "interactive",
+        })).unwrap();
+
+    // Corrupt the primary hidden header (last 512 bytes) with zeros
+    let file_size = std::fs::metadata(&path).unwrap().len();
+    {
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.seek(SeekFrom::Start(file_size - 512)).unwrap();
+        f.write_all(&[0u8; 512]).unwrap();
+    }
+
+    // Hidden volume must still open using the backup header at EOF-1024
+    let c = VnmContainer::open(&path, OpenCredential::Password(b"hidden")).unwrap();
+    assert!(c.is_hidden);
+    assert_eq!(c.label.as_deref(), Some("Hidden"));
+    std::fs::remove_file(&path).ok();
+}
+
 // ── Root block ────────────────────────────────────────────────────────────────
 
 #[test]

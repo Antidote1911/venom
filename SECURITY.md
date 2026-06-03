@@ -83,7 +83,7 @@ returned to the free list. Deleted files leave no recoverable ciphertext.
 
 | Limitation | Impact |
 |------------|--------|
-| No header backup | A single corrupted header means total data loss. VeraCrypt keeps a redundant copy. |
+| ~~No header backup~~ | Implemented: outer backup at [512..1024], hidden backup at EOF-1024. |
 | Hidden volume: single password only | The hidden volume does not support ML-KEM key recipients or multiple passwords. |
 | No `fsck` tool | Orphaned slots (from a crash during write-through) are not reclaimed automatically. |
 | Custom filesystem format | A forensic examiner with the key can identify the Venom VaultNode format. Standard filesystems (FAT, ext4) inside the container would offer stronger format deniability. |
