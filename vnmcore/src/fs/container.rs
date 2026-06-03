@@ -304,36 +304,40 @@ impl VnmContainer {
         // If the primary header's plaintext fields look corrupted (both counts
         // zero), fall back to a backup header's plaintext before running KDF.
         //
+        // Read n_pw / n_key from plaintext (cipher byte 64 is always 0 — ignored).
         let raw_0 = read_512_at(path, 0).unwrap_or([0u8; 512]);
-        let (cipher0, _, n_pw0, n_key0) = read_header_plaintext(&raw_0);
+        let (_, n_pw0, n_key0) = read_header_plaintext(&raw_0);
 
-        let (cipher, n_pw, n_key) = if n_pw0 == 0 && n_key0 == 0 {
+        let (n_pw, n_key) = if n_pw0 == 0 && n_key0 == 0 {
             // Primary plaintext zeroed — try backup locations for valid counts
             [file_size.saturating_sub(512), file_size.saturating_sub(1024)]
                 .iter()
                 .find_map(|&off| {
                     read_512_at(path, off).ok().and_then(|raw| {
-                        let (c, _, p, k) = read_header_plaintext(&raw);
-                        if p > 0 || k > 0 { Some((c, p, k)) } else { None }
+                        let (_, p, k) = read_header_plaintext(&raw);
+                        if p > 0 || k > 0 { Some((p, k)) } else { None }
                     })
                 })
-                .unwrap_or((cipher0, n_pw0, n_key0))
+                .unwrap_or((n_pw0, n_key0))
         } else {
-            (cipher0, n_pw0, n_key0)
+            (n_pw0, n_key0)
         };
 
+        // Cipher is discovered by trying all supported ciphers during slot decryption.
+        // Argon2id (password) or ML-KEM decapsulation runs once per slot; only AEAD
+        // verification is repeated for each cipher candidate.
         let k_outer = match &credential {
-            OpenCredential::Password(pw)     => try_pw_slots(path, pw, n_pw, cipher),
-            OpenCredential::PrivateKey(priv_) => try_key_slots(path, priv_, n_key, cipher),
+            OpenCredential::Password(pw)     => try_pw_slots(path, pw, n_pw),
+            OpenCredential::PrivateKey(priv_) => try_key_slots(path, priv_, n_key),
         };
 
         // Try to authenticate against each header copy (cheap AEAD, no extra KDF).
         // Order: primary → EOF-512 backup → EOF-1024 backup.
-        if let Some(k) = k_outer {
+        if let Some((k, cipher)) = k_outer {
             let offsets = [0u64, file_size.saturating_sub(512), file_size.saturating_sub(1024)];
             for &off in &offsets {
                 if let Ok(raw) = read_512_at(path, off) {
-                    if let Ok(meta) = decode_header(&raw, &k, false) {
+                    if let Ok(meta) = decode_header(&raw, &k, cipher, false) {
                         let has_gen = meta.container_id != [0u8; 16];
                         let store = open_store(path, k.clone(), meta.cipher, 0, meta.outer_slots, OUTER_ALLOC_SLOT, has_gen)?;
                         store.load_free_list()?;
@@ -400,7 +404,7 @@ impl VnmContainer {
     /// List all recipient slots (password and ML-KEM).
     pub fn list_recipients(&self) -> Result<Vec<RecipientInfo>> {
         let raw = read_512_at(&self.path, 0)?;
-        let (_, _, n_pw, n_key) = read_header_plaintext(&raw);
+        let (_, n_pw, n_key) = read_header_plaintext(&raw);
         let mut out = vec![];
         for i in 0..n_pw as usize {
             out.push(RecipientInfo { is_key: false, slot_index: i });
@@ -414,26 +418,26 @@ impl VnmContainer {
     /// Add a new password recipient.
     pub fn add_password_recipient(&self, new_password: &[u8]) -> Result<()> {
         let raw = read_512_at(&self.path, 0)?;
-        let (cipher, kdf_profile, n_pw, n_key) = read_header_plaintext(&raw);
+        let (kdf_profile, n_pw, n_key) = read_header_plaintext(&raw);
         if n_pw as usize >= MAX_PASSWORD_SLOTS {
             return Err(VnmError::InvalidFormat("max password recipients reached".into()));
         }
         let slot = encode_password_slot(&self.k_master, new_password, kdf_profile, self.cipher)?;
         write_recipient_slot(&self.path, n_pw as usize, &slot)?;
-        update_slot_counts(&self.path, n_pw + 1, n_key, &self.k_master, cipher, &raw)?;
+        update_slot_counts(&self.path, n_pw + 1, n_key, &self.k_master, self.cipher, &raw)?;
         Ok(())
     }
 
     /// Add a new ML-KEM (post-quantum) recipient using their public key.
     pub fn add_key_recipient(&self, recipient: &HybridPublicKey) -> Result<()> {
         let raw = read_512_at(&self.path, 0)?;
-        let (cipher, _, n_pw, n_key) = read_header_plaintext(&raw);
+        let (_, n_pw, n_key) = read_header_plaintext(&raw);
         if n_key as usize >= MAX_KEY_SLOTS {
             return Err(VnmError::InvalidFormat("max key recipients reached".into()));
         }
         let slot = encode_key_slot(&self.k_master, recipient, self.cipher)?;
         write_key_slot_raw(&self.path, n_key as usize, &slot)?;
-        update_slot_counts(&self.path, n_pw, n_key + 1, &self.k_master, cipher, &raw)?;
+        update_slot_counts(&self.path, n_pw, n_key + 1, &self.k_master, self.cipher, &raw)?;
         Ok(())
     }
 
@@ -443,7 +447,7 @@ impl VnmContainer {
     /// Remaining slots are compacted (shifted down) and the freed slot is wiped.
     pub fn remove_key_recipient(&self, slot_index: usize) -> Result<()> {
         let raw = read_512_at(&self.path, 0)?;
-        let (cipher, _, n_pw, n_key) = read_header_plaintext(&raw);
+        let (_, n_pw, n_key) = read_header_plaintext(&raw);
 
         if slot_index >= n_key as usize {
             return Err(VnmError::InvalidFormat("key slot index out of range".into()));
@@ -464,7 +468,7 @@ impl VnmContainer {
         rng.fill_bytes(&mut random_slot);
         write_key_slot_raw(&self.path, slots.len(), random_slot.as_slice().try_into().unwrap())?;
 
-        update_slot_counts(&self.path, n_pw, n_key - 1, &self.k_master, cipher, &raw)?;
+        update_slot_counts(&self.path, n_pw, n_key - 1, &self.k_master, self.cipher, &raw)?;
         Ok(())
     }
 
@@ -576,11 +580,11 @@ fn write_key_slot_raw(path: &Path, j: usize, slot: &[u8; KEY_SLOT_SIZE]) -> Resu
     write_bytes_at(path, key_slot_offset(j), slot)
 }
 
-/// Try all password slots with the given password.  Returns K_master (locked) on success.
-fn try_pw_slots(path: &Path, pw: &[u8], n: u8, cipher: CipherAlgorithm) -> Option<LockedMemory<[u8; 32]>> {
+/// Try all password slots.  Returns (K_master locked, cipher) on success.
+fn try_pw_slots(path: &Path, pw: &[u8], n: u8) -> Option<(LockedMemory<[u8; 32]>, CipherAlgorithm)> {
     for i in 0..n as usize {
         let slot = read_pw_slot_raw(path, i).ok()?;
-        if let Some(k) = try_password_slot(&slot, pw, cipher) { return Some(k); }
+        if let Some(result) = try_password_slot(&slot, pw) { return Some(result); }
     }
     None
 }
@@ -593,11 +597,11 @@ fn read_pw_slot_raw(path: &Path, i: usize) -> Result<[u8; PW_SLOT_SIZE]> {
     Ok(buf)
 }
 
-/// Try all ML-KEM slots with the given private key.  Returns K_master (locked) on success.
-fn try_key_slots(path: &Path, private: &HybridPrivateKey, n: u8, cipher: CipherAlgorithm) -> Option<LockedMemory<[u8; 32]>> {
+/// Try all ML-KEM slots.  Returns (K_master locked, cipher) on success.
+fn try_key_slots(path: &Path, private: &HybridPrivateKey, n: u8) -> Option<(LockedMemory<[u8; 32]>, CipherAlgorithm)> {
     for j in 0..n as usize {
         let slot = read_key_slot_raw(path, j).ok()?;
-        if let Some(k) = try_key_slot(&slot, private, cipher) { return Some(k); }
+        if let Some(result) = try_key_slot(&slot, private) { return Some(result); }
     }
     None
 }
@@ -609,9 +613,9 @@ fn try_key_slots(path: &Path, private: &HybridPrivateKey, n: u8, cipher: CipherA
 ///   with hidden (tail = 1024 B): backup at EOF-1024 (leaves EOF-512 for hidden primary)
 fn update_slot_counts(
     path: &Path, n_pw: u8, n_key: u8, k_master: &[u8; 32],
-    _cipher: CipherAlgorithm, old_raw: &[u8; 512],
+    cipher: CipherAlgorithm, old_raw: &[u8; 512],
 ) -> Result<()> {
-    let meta = decode_header(old_raw, k_master, false)?;
+    let meta = decode_header(old_raw, k_master, cipher, false)?;
     let new_payload = HeaderPayload { num_password_slots: n_pw, num_key_slots: n_key, ..meta };
     let new_hdr = encode_header(&new_payload, k_master, false)?;
 
@@ -624,12 +628,16 @@ fn update_slot_counts(
 }
 
 /// Try to open a hidden volume from a specific header offset.
-/// Returns (K_master locked, HeaderPayload) on success, None otherwise.
+/// Derives K_hidden once, then probes all cipher candidates via AEAD.
 fn try_hidden_at(path: &Path, hdr_offset: u64, password: &[u8]) -> Option<(LockedMemory<[u8; 32]>, HeaderPayload)> {
-    let raw  = read_512_at(path, hdr_offset).ok()?;
-    let k    = derive_hidden_key(&raw, password).ok()?;
-    let meta = decode_header(&raw, &*k, true).ok()?;
-    Some((k, meta))
+    let raw = read_512_at(path, hdr_offset).ok()?;
+    let k   = derive_hidden_key(&raw, password).ok()?;
+    for &cipher in &[CipherAlgorithm::XChaCha20Poly1305, CipherAlgorithm::Aes256Gcm] {
+        if let Ok(meta) = decode_header(&raw, &*k, cipher, true) {
+            return Some((k, meta));
+        }
+    }
+    None
 }
 
 /// Derive the hidden-header encryption key from the password.
@@ -638,6 +646,8 @@ fn try_hidden_at(path: &Path, hdr_offset: u64, password: &[u8]) -> Option<(Locke
 /// `LockedMemory<[u8; 32]>` allocation, so K_hidden never appears on the stack
 /// as a plain array.  The source Vec is dropped (and zeroized via ZeroizeOnDrop
 /// on DerivedKey) immediately after the copy.
+/// Derive K_hidden from the password + salt embedded in the header.
+/// Returns the key in locked memory (no cipher probing here).
 fn derive_hidden_key(raw: &[u8; 512], password: &[u8]) -> Result<LockedMemory<[u8; 32]>> {
     use crate::crypto::derive_key;
     use crate::container::kdf_params_for_profile;
@@ -645,11 +655,11 @@ fn derive_hidden_key(raw: &[u8; 512], password: &[u8]) -> Result<LockedMemory<[u
     let kdf_profile = raw[65];
     let mut kdf = kdf_params_for_profile(if kdf_profile == 1 { "sensitive" } else { "interactive" });
     kdf.salt = hex::encode(salt);
-    let dk = derive_key(password, &kdf)?;
+    let dk  = derive_key(password, &kdf)?;
     let src = dk.as_bytes();
     if src.len() != 32 { return Err(VnmError::KdfError("unexpected key length".into())); }
     let mut lm = LockedMemory::new([0u8; 32]);
-    lm.copy_from_slice(src);   // heap Vec → locked heap, no stack intermediary
+    lm.copy_from_slice(src);
     Ok(lm)
 }
 
@@ -676,7 +686,7 @@ fn encode_header_with_password(
     // Build the header with this key
     let mut buf = [0u8; 512];
     buf[0..64].copy_from_slice(&salt);
-    buf[64] = payload.cipher as u8;
+    buf[64] = 0; // cipher hidden — always 0
     buf[65] = payload.kdf_profile;
     buf[66] = payload.num_password_slots;
     buf[67] = payload.num_key_slots;

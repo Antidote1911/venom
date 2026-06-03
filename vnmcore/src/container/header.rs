@@ -110,7 +110,7 @@ pub fn encode_header(
     rand::thread_rng().fill_bytes(&mut salt);
     buf[0..SALT_LEN].copy_from_slice(&salt);
 
-    buf[64] = payload.cipher as u8;
+    buf[64] = 0; // cipher hidden — always 0; real cipher is in the AEAD-protected body
     buf[65] = payload.kdf_profile;
     buf[66] = payload.num_password_slots;
     buf[67] = payload.num_key_slots;
@@ -136,24 +136,21 @@ pub fn encode_header(
 }
 
 /// Decrypt a 512-byte header with K_master.
+///
+/// `cipher` must be determined by the caller (e.g. from a successful slot
+/// decryption) — it is no longer read from the plaintext byte 64, which is
+/// always written as 0 to hide the cipher choice from unauthenticated observers.
 pub fn decode_header(
     raw:       &[u8; HEADER_SIZE],
     k_master:  &[u8; 32],
+    cipher:    CipherAlgorithm,
     is_hidden: bool,
 ) -> Result<HeaderPayload> {
-    let cipher_id  = raw[64];
     let kdf_profile = raw[65];
-    let num_pw     = raw[66];
-    let num_key    = raw[67];
-
-    let cipher = match cipher_id {
-        0 => CipherAlgorithm::XChaCha20Poly1305,
-        1 => CipherAlgorithm::Aes256Gcm,
-        _ => return Err(VnmError::InvalidFormat(format!("unknown cipher {cipher_id}"))),
-    };
+    let num_pw      = raw[66];
+    let num_key     = raw[67];
 
     let aad  = if is_hidden { AAD_HIDDEN } else { AAD_OUTER };
-    // Pass exactly the encrypted blob bytes — not the full tail — so the AEAD tag is at the right position.
     let body = decrypt_block(k_master, cipher, aad, &raw[BODY_OFFSET..BODY_OFFSET + enc_body_size(cipher)])
         .map_err(|_| VnmError::AuthenticationFailed)?;
 
@@ -173,14 +170,13 @@ pub fn decode_header(
         outer_slots, hidden_start, root_slot, created_at, label, container_id })
 }
 
-/// Read plaintext fields from a raw header (cipher, kdf_profile, slot counts).
-/// Used to know how many recipient slots to read before we have K_master.
-pub fn read_header_plaintext(raw: &[u8; HEADER_SIZE]) -> (CipherAlgorithm, u8, u8, u8) {
-    let cipher = match raw[64] {
-        1 => CipherAlgorithm::Aes256Gcm,
-        _ => CipherAlgorithm::XChaCha20Poly1305,
-    };
-    (cipher, raw[65], raw[66], raw[67])
+/// Read unauthenticated plaintext fields from a raw header: kdf_profile, slot counts.
+///
+/// Byte 64 (cipher_id) is intentionally excluded — it is always written as 0
+/// to hide the cipher choice; the real cipher is discovered by trying all
+/// supported ciphers during slot decryption.
+pub fn read_header_plaintext(raw: &[u8; HEADER_SIZE]) -> (u8, u8, u8) {
+    (raw[65], raw[66], raw[67]) // kdf_profile, num_password_slots, num_key_slots
 }
 
 /// Hardcoded Argon2id parameters per profile ID.

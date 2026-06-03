@@ -65,9 +65,10 @@ Deux en-têtes existent dans chaque fichier :
 Offset  Taille  Type        Description
 ──────────────────────────────────────────────────────────────────────────
 0       64      [u8; 64]    salt — sel Argon2id de ce volume (aléatoire)
-64       1      u8          cipher_id
-                              0 = ChaCha20-Poly1305
-                              1 = AES-256-GCM
+64       1      u8          cipher_id — toujours 0 (cipher caché)
+                            Le vrai cipher est découvert lors de l'ouverture
+                            en testant tous les ciphers supportés via AEAD.
+                            Valeur 0 pour tous les nouveaux conteneurs.
 65       1      u8          kdf_profile_id
                               0 = interactive  (m=65 536 KiB, t=3, p=4)
                               1 = sensitive    (m=262 144 KiB, t=4, p=4)
@@ -540,15 +541,18 @@ l'aveugle pour préserver l'anonymat des destinataires.
 
 ```
 1. Tenter d'ouvrir l'en-tête extérieur primaire [0..512] :
-     a. Lire cipher_id, kdf_profile, num_password_slots, num_key_slots
-     b. Pour chaque password slot [0..num_password_slots) à offset (1024 + i×101) :
-          slot_key = Argon2id(password, salt=slot[0..32], profile=slot[32])
-          K_master = AEAD_decrypt(slot_key, slot[33..101])
-          Si succès → aller en 1d
-     c. Pour chaque key slot [0..num_key_slots) à offset (1832 + j×1668) :
-          Décapsuler (essai aveugle) → K_master
-          Si succès → aller en 1d
-     d. Déchiffrer le bloc VNMB [68..500] avec K_master → valider magic b"VNM1"
+     a. Lire kdf_profile, num_password_slots, num_key_slots (byte 64 ignoré — toujours 0)
+     b. Pour chaque password slot [0..num_password_slots) à offset (1024 + i×113) :
+          slot_key = Argon2id(password, salt=slot[0..32], profile=slot[32])  [1× par slot]
+          Pour chaque cipher {XChaCha20-Poly1305, AES-256-GCM} :
+            K_master = AEAD_decrypt(slot_key, slot[33..33+E], cipher)
+            Si succès → cipher découvert, aller en 1d
+     c. Pour chaque key slot [0..num_key_slots) à offset (1928 + j×1680) :
+          shared_secret = ML-KEM-Decaps + X25519  [1× par slot]
+          Pour chaque cipher {XChaCha20-Poly1305, AES-256-GCM} :
+            K_master = AEAD_decrypt(shared_secret, slot[1600..1600+E], cipher)
+            Si succès → cipher découvert, aller en 1d
+     d. Déchiffrer le bloc VNMB avec K_master et le cipher découvert → valider magic b"VNM1"
 
 2. Si l'étape 1 échoue :
      - Ciphertext corrompu (plaintext intact) : K_master déjà connu, essayer

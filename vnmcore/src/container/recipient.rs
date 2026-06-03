@@ -66,25 +66,34 @@ pub fn encode_password_slot(
     Ok(buf)
 }
 
-/// Attempt to decrypt K_master from a password slot.
+/// Ciphers tried in order during blind decryption.
+const ALL_CIPHERS: &[CipherAlgorithm] =
+    &[CipherAlgorithm::XChaCha20Poly1305, CipherAlgorithm::Aes256Gcm];
+
+/// Attempt to decrypt K_master from a password slot without knowing the cipher.
 ///
-/// K_master is written directly into a `LockedMemory<[u8; 32]>` allocation
-/// using `decrypt_block_into_32`, avoiding any unprotected stack or heap copy
-/// of the master key.  The derived slot key (`key`) is a transient stack value.
+/// Argon2id runs **once**; then each supported cipher is tried with a cheap
+/// AEAD verification until one succeeds.  Returns K_master in locked memory
+/// alongside the discovered cipher.
 pub fn try_password_slot(
-    slot: &[u8; PW_SLOT_SIZE], password: &[u8], cipher: CipherAlgorithm,
-) -> Option<LockedMemory<[u8; 32]>> {
+    slot: &[u8; PW_SLOT_SIZE], password: &[u8],
+) -> Option<(LockedMemory<[u8; 32]>, CipherAlgorithm)> {
     let salt        = &slot[0..32];
     let kdf_profile = slot[32];
-    let enc_end     = 33 + vnmb_enc_32(cipher);
-    let enc         = &slot[33..enc_end];
     let mut kdf = kdf_params_for_profile_id(kdf_profile);
     kdf.salt = hex::encode(salt);
     let dk  = derive_key(password, &kdf).ok()?;
-    let key: [u8; 32] = dk.as_array_32()?;          // transient slot key, not K_master
-    let mut lm = LockedMemory::new([0u8; 32]);
-    decrypt_block_into_32(&key, cipher, AAD_PW, enc, &mut *lm).ok()?;
-    Some(lm)
+    let key: [u8; 32] = dk.as_array_32()?; // transient slot key
+
+    for &cipher in ALL_CIPHERS {
+        let enc_end = 33 + vnmb_enc_32(cipher);
+        let enc     = &slot[33..enc_end];
+        let mut lm  = LockedMemory::new([0u8; 32]);
+        if decrypt_block_into_32(&key, cipher, AAD_PW, enc, &mut *lm).is_ok() {
+            return Some((lm, cipher));
+        }
+    }
+    None
 }
 
 // ── Hybrid key slot (X25519 + ML-KEM-1024) ───────────────────────────────────
@@ -102,20 +111,26 @@ pub fn encode_key_slot(
     Ok(buf)
 }
 
-/// Attempt to decrypt K_master from a hybrid key slot.
+/// Attempt to decrypt K_master from a hybrid key slot without knowing the cipher.
 ///
-/// The hybrid shared secret (`shared`) is a transient stack value.
-/// K_master is written directly into locked memory via `decrypt_block_into_32`.
+/// ML-KEM decapsulation runs **once**; then each supported cipher is tried
+/// until the AEAD tag verifies.  Returns K_master in locked memory and the
+/// discovered cipher.
 pub fn try_key_slot(
-    slot: &[u8; KEY_SLOT_SIZE], private: &HybridPrivateKey, cipher: CipherAlgorithm,
-) -> Option<LockedMemory<[u8; 32]>> {
+    slot: &[u8; KEY_SLOT_SIZE], private: &HybridPrivateKey,
+) -> Option<(LockedMemory<[u8; 32]>, CipherAlgorithm)> {
     let x25519_eph_pk: &[u8; X25519_PK_SIZE] = slot[0..X25519_PK_SIZE].try_into().ok()?;
     let mlkem_ct:      &[u8; CT_SIZE]         = slot[X25519_PK_SIZE..X25519_PK_SIZE + CT_SIZE].try_into().ok()?;
-    let enc_start = X25519_PK_SIZE + CT_SIZE;
-    let enc_end   = enc_start + vnmb_enc_32(cipher);
-    let enc       = &slot[enc_start..enc_end];
-    let shared = decapsulate(private, x25519_eph_pk, mlkem_ct).ok()?;  // transient shared secret
-    let mut lm = LockedMemory::new([0u8; 32]);
-    decrypt_block_into_32(&shared, cipher, AAD_KEY, enc, &mut *lm).ok()?;
-    Some(lm)
+    let shared = decapsulate(private, x25519_eph_pk, mlkem_ct).ok()?; // transient
+    let enc_base = X25519_PK_SIZE + CT_SIZE;
+
+    for &cipher in ALL_CIPHERS {
+        let enc_end = enc_base + vnmb_enc_32(cipher);
+        let enc     = &slot[enc_base..enc_end];
+        let mut lm  = LockedMemory::new([0u8; 32]);
+        if decrypt_block_into_32(&shared, cipher, AAD_KEY, enc, &mut *lm).is_ok() {
+            return Some((lm, cipher));
+        }
+    }
+    None
 }
