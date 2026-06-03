@@ -22,6 +22,34 @@ indistinguishable from encrypted data, enabling plausible deniability.
 
 ---
 
+## Comparison with VeraCrypt
+
+| Property | VeraCrypt | Venom |
+|----------|:---------:|:-----:|
+| **Encryption mode** | XTS-AES (no integrity) | AEAD per slot (AES-256-GCM / ChaCha20-Poly1305) |
+| **Per-block authentication** | ✗ silent corruption possible | ✓ 128-bit tag, decryption fails on tampering |
+| **Slot-swap / relocation attack** | ✗ | ✓ slot index as AAD |
+| **Nonce** | Deterministic (sector number) | Random 96-bit per write |
+| **KDF** | PBKDF2-SHA512 | Argon2id (memory-hard, RFC 9106) |
+| **GPU/ASIC resistance** | ✗ CPU-bound only | ✓ 64–256 MiB RAM required per guess |
+| **Post-quantum recipients** | ✗ | ✓ X25519 + ML-KEM-1024 (NIST FIPS 203) |
+| **Multi-recipient** | ✗ single password/keyfile | ✓ up to 8 passwords + 8 hybrid keys |
+| **Recipient anonymity** | N/A | ✓ no plaintext fingerprint in container |
+| **Hidden volumes** | ✓ | ✓ |
+| **Forward secrecy (deleted files)** | ✗ ciphertext remains on disk | ✓ slot wiped with random bytes on free |
+| **Header backup** | ✓ redundant copy | ✗ single header (planned) |
+| **Cipher cascades** | ✓ AES-Twofish-Serpent… | ✗ one cipher per container |
+| **Inner filesystem** | FAT / exFAT / ext4 / NTFS | Custom VaultNode (msgpack) |
+| **Single-file container** | ✓ | ✓ |
+| **FUSE mount** | ✓ | ✓ |
+| **Open-source** | ✓ | ✓ |
+
+> VeraCrypt's XTS mode was designed for raw disk encryption where the OS filesystem
+> layer provides integrity. Venom authenticates every slot independently — there is
+> no equivalent OS layer to rely on inside a FUSE container.
+
+---
+
 ## Security model
 
 Each 32 KB slot is independently encrypted with a fresh random nonce and
