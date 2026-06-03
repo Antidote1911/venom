@@ -541,14 +541,18 @@ Le cipher Triple (cipher_id=2) applique trois couches de chiffrement successives
 |--------|-----------|----:|------:|
 | 1 | XChaCha20-Poly1305 | 32 B | 24 B |
 | 2 | Deoxys-II-256 (CAESAR "defense in depth") | 32 B | 15 B |
-| 3 | Serpent-128-CTR + HMAC-SHA256 | 16 B + 32 B | 16 B |
+| 3 | Serpent-256-CTR + HMAC-SHA256 | 32 B + 32 B | 16 B |
 
 ```
-K1     = HMAC-SHA256(K_master, "\x01venom:triple:xchacha20")
-K2     = HMAC-SHA256(K_master, "\x02venom:triple:deoxys")
-K3_enc = HMAC-SHA256(K_master, "\x03venom:triple:serpent:enc")[0..16]
-K3_mac = HMAC-SHA256(K_master, "\x04venom:triple:serpent:mac")
+K1     = HMAC-SHA256(K_master, "\x01venom:triple:xchacha20")   — 32 B
+K2     = HMAC-SHA256(K_master, "\x02venom:triple:deoxys")      — 32 B
+K3_enc = HMAC-SHA256(K_master, "\x03venom:triple:serpent:enc") — 32 B
+K3_mac = HMAC-SHA256(K_master, "\x04venom:triple:serpent:mac") — 32 B
 ```
+
+Tous les subkeys sont 256 bits. `K3_enc` est passé à `Serpent::new_from_slice`
+qui accepte 16–32 octets via une implémentation variable-length (contrairement
+à `Ctr128BE::new_from_slices` qui est limité à `KeySizeUser::KeySize = U16 = 16 B`).
 
 **VNMB Triple block layout :**
 

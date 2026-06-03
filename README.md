@@ -31,7 +31,7 @@ indistinguishable from encrypted data, enabling plausible deniability.
 |----------|:---------:|:-----:|
 | Property | VeraCrypt | Venom |
 |----------|:---------:|:-----:|
-| **Encryption mode** | XTS-AES (no integrity) | AEAD per slot (XChaCha20 / AES-256-GCM / Triple) |
+| **Encryption mode** | XTS-AES (no integrity) | AEAD per slot (XChaCha20 / AES-256-GCM / **Triple**) |
 | **Per-block authentication** | ✗ silent corruption possible | ✓ 128-bit tag, decryption fails on tampering |
 | **Slot-swap / relocation attack** | ✗ | ✓ slot index as AAD |
 | **Nonce** | Deterministic (sector number) | 192-bit random (XChaCha20) / 128-bit random (AES) |
@@ -46,7 +46,7 @@ indistinguishable from encrypted data, enabling plausible deniability.
 | **Forward secrecy (deleted files)** | ✗ ciphertext remains on disk | ✓ slot wiped with random bytes on free |
 | **Key material in locked memory** | ✗ | ✓ K_master in `mlock`'d heap, never swapped |
 | **Header backup** | ✓ redundant copy | ✓ outer at EOF, hidden at [512..1024] (geographic separation) |
-| **Cipher cascades** | ✓ AES-Twofish-Serpent… | ✓ Triple: XChaCha20 + Deoxys-II-256 + Serpent |
+| **Cipher cascades** | ✓ AES-Twofish-Serpent… | ✓ Triple: XChaCha20-256 + Deoxys-II-256 + Serpent-256 |
 | **Inner filesystem** | FAT / exFAT / ext4 / NTFS | Custom VaultNode (msgpack) |
 | **Single-file container** | ✓ | ✓ |
 | **FUSE mount** | ✓ | ✓ |
