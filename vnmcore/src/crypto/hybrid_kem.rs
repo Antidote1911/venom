@@ -20,7 +20,6 @@
 //! BLAKE3's derive_key() hashes the context string with a distinct IV, providing
 //! stronger domain separation than prepending a label to a plain hash input.
 
-use sha2::{Sha256, Digest};
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519Pub, StaticSecret};
 
 
@@ -38,12 +37,12 @@ pub struct HybridPublicKey {
 }
 
 impl HybridPublicKey {
-    /// Fingerprint = SHA-256(x25519_pk || mlkem_ek)[0..8].
+    /// Fingerprint = BLAKE3(x25519_pk || mlkem_ek)[0..8].
     pub fn fingerprint(&self) -> [u8; 8] {
-        let mut h = Sha256::new();
+        let mut h = blake3::Hasher::new();
         h.update(&self.x25519_pk);
-        h.update(&self.mlkem_ek);
-        h.finalize()[..8].try_into().unwrap()
+        h.update(self.mlkem_ek.as_ref());
+        h.finalize().as_bytes()[..8].try_into().unwrap()
     }
 }
 

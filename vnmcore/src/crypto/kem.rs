@@ -9,7 +9,6 @@
 //!   Ciphertext:         1568 B — included in the recipient slot on disk
 //!   SharedSecret:         32 B — AEAD key used to wrap K_master
 
-use sha2::{Sha256, Digest};
 use ml_kem::{
     MlKem1024, Seed as MlSeed,
     kem::{Kem, Decapsulate, Encapsulate, KeyExport},
@@ -67,7 +66,7 @@ pub fn decapsulate(seed: &Seed, ct_bytes: &KemCiphertext) -> Result<SharedSecret
         .map_err(|_| VnmError::CipherError("SS size mismatch".into()))
 }
 
-/// First 8 bytes of SHA-256(encap_key) — identifies which slot belongs to a given key.
+/// First 8 bytes of BLAKE3(encap_key) — identifies which slot belongs to a given key.
 pub fn fingerprint(ek: &EncapKey) -> [u8; 8] {
-    Sha256::digest(ek.as_ref())[..8].try_into().unwrap()
+    blake3::hash(ek.as_ref()).as_bytes()[..8].try_into().unwrap()
 }
