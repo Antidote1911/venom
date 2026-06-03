@@ -39,12 +39,12 @@ venom/
 ```
 [0..512]         Outer header (VNM1) — encrypted with K_master
 [512..1024]      Hidden header backup (or random bytes)
-[1024..2560]     Password recipient area: 8 × 192 B
-                   salt(32) + profile(1) + Triple_AEAD(K_master, 159B)
+[1024..2432]     Password recipient area: 8 × 176 B
+                   salt(32) + profile(1) + Triple_AEAD(K_master, 143B)
                    Password slots always use Triple regardless of container cipher.
-[2560..16632]    Hybrid key recipient area: 8 × 1759 B
-                   x25519_eph_pk(32) + mlkem_ct(1568) + AEAD(K_master, ≤159B)
-[16632..]        Data slots (32 KB each)
+[2432..16376]    Hybrid key recipient area: 8 × 1743 B
+                   x25519_eph_pk(32) + mlkem_ct(1568) + AEAD(K_master, ≤143B)
+[16376..]        Data slots (32 KB each)
 [EOF-1024..EOF-512]  Outer header backup
 [EOF-512..EOF]   Hidden header primary (or random bytes)
 ```
@@ -66,7 +66,7 @@ Credentials only serve to decrypt `K_master`. Adding or revoking a recipient
 | 0 | XChaCha20-Poly1305 | Default; 192-bit nonce |
 | 1 | Deoxys-II-256 | CAESAR finalist; 120-bit nonce |
 | 2 | Serpent-256-EAX | EAX = CTR + OMAC; 128-bit nonce |
-| 3 | Triple (cascade) | XChaCha20 → Deoxys-II-256 → Serpent-256-CTR/HMAC |
+| 3 | Triple (cascade) | XChaCha20-Poly1305 → Deoxys-II-256 → Serpent-256-EAX |
 
 Password slots always use Triple encryption for `K_master`.
 Cipher is never stored in plaintext — discovered by blind AEAD probing on open.

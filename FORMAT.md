@@ -42,14 +42,14 @@ Constantes :
 | `HEADER_REGION_SIZE`   |   1 024 | fixe (2 × 512)                                |
 | `MAX_PASSWORD_SLOTS`   |       8 | fixe                                          |
 | `MAX_KEY_SLOTS`        |       8 | fixe                                          |
-| `PW_SLOT_SIZE`         |     192 | 32 + 1 + 159  (Triple max, toujours Triple)   |
-| `KEY_SLOT_SIZE`        |   1 759 | 32 + 1 568 + 159                              |
-| `RECIPIENT_AREA_SIZE`  |  15 608 | 8 × 192 + 8 × 1 759                           |
-| `DATA_AREA_OFFSET`     |  16 632 | 1 024 + 15 608                                |
+| `PW_SLOT_SIZE`         |     176 | 32 + 1 + 143  (Triple max, toujours Triple)   |
+| `KEY_SLOT_SIZE`        |   1 743 | 32 + 1 568 + 143                              |
+| `RECIPIENT_AREA_SIZE`  |  15 352 | 8 × 176 + 8 × 1 743                           |
+| `DATA_AREA_OFFSET`     |  16 376 | 1 024 + 15 352                                |
 | `SLOT_SIZE`            |  32 768 | fixe                                          |
 
 Taille minimale d'un fichier conteneur :
-`DATA_AREA_OFFSET + 16 × SLOT_SIZE + 512 = 16 632 + 524 288 + 512 = 541 432 octets`
+`DATA_AREA_OFFSET + 16 × SLOT_SIZE + 512 = 16 376 + 524 288 + 512 = 541 176 octets`
 
 ---
 
@@ -117,11 +117,11 @@ Offset  Taille  Description (Triple)
 72       4      version u32 LE = 1
 76      24      nonce1 — XChaCha20-Poly1305
 100     15      nonce2 — Deoxys-II-256
-115     16      nonce3 — Serpent-256-CTR
-131    317      corps chiffré (body_len = 317)
-448     16      tag1 (Poly1305)
-464     16      tag2 (Deoxys)
-480     32      HMAC-SHA256 (couche Serpent)
+115     16      nonce3 — Serpent-256-EAX
+131    333      corps chiffré (body_len = 333)
+464     16      tag1 (Poly1305)
+480     16      tag2 (Deoxys)
+496     16      tag3 (Serpent EAX)
 ──────────────────────────────────────────────────────────────────────────
 ```
 
@@ -178,8 +178,8 @@ Disposition fixe, jamais réallouée :
 ```
 Offset                  Taille          Description
 ──────────────────────────────────────────────────────────────────────────
-1 024                   8 × 192 = 1 536   8 password slots (voir §3.1)
-1 024 + 1 536 = 2 560   8 × 1 759 = 14 072   8 hybrid key slots (voir §3.2)
+1 024                   8 × 176 = 1 408   8 password slots (voir §3.1)
+1 024 + 1 408 = 2 432   8 × 1 743 = 13 944   8 hybrid key slots (voir §3.2)
 ──────────────────────────────────────────────────────────────────────────
 Total                   15 608 octets
 ```
@@ -187,7 +187,7 @@ Total                   15 608 octets
 Les slots inutilisés contiennent des octets aléatoires
 (indiscernables des slots actifs, deniabilité plausible).
 
-### 3.1 Password slot (192 octets)
+### 3.1 Password slot (176 octets)
 
 Chaque slot chiffre `K_master` avec une clé dérivée du mot de passe.
 **Les password slots utilisent toujours le cipher Triple** (protection maximale
@@ -198,16 +198,16 @@ Offset  Taille  Type        Description
 ──────────────────────────────────────────────────────────────────────────
 0       32      [u8; 32]    salt Argon2id (aléatoire, unique par slot)
 32       1      u8          kdf_profile_id (0=interactive, 1=sensitive)
-33     159      VNMB block  K_master chiffré avec Triple
-                            (8+55+32+64 = 159 octets)
+33     143      VNMB block  K_master chiffré avec Triple
+                            (8+55+32+48 = 143 octets)
 ──────────────────────────────────────────────────────────────────────────
-Total  192 octets
+Total  176 octets
 ```
 
 Dérivation de la clé de slot et déchiffrement :
 ```
 slot_key = Argon2id(password, salt=slot[0..32], profile=slot[32])   [1× par slot]
-K_master = Triple_decrypt(slot_key, slot[33..192], aad=b"vnm:pw:v1")
+K_master = Triple_decrypt(slot_key, slot[33..176], aad=b"vnm:pw:v1")
 ```
 
 À l'ouverture, Argon2id est exécuté **une seule fois** par slot. Si le déchiffrement
@@ -228,7 +228,7 @@ Offset  Taille  Type        Description
 ──────────────────────────────────────────────────────────────────────────
 0       32      [u8; 32]    x25519_eph_pk — clé publique éphémère X25519
 32    1 568      [u8; 1568]  mlkem_ct — chiffré ML-KEM-1024
-1 600  159      VNMB block  K_master chiffré (max 159 B avec Triple)
+1 600  143      VNMB block  K_master chiffré (max 143 B avec Triple)
 ──────────────────────────────────────────────────────────────────────────
 Total  1 759 octets
 ```
@@ -275,13 +275,13 @@ Tailles par cipher :
 | XChaCha20-Poly1305   | 24 B  | 16 B   | 48 B           | 396 B             |
 | Deoxys-II-256        | 15 B  | 16 B   | 39 B           | 405 B             |
 | Serpent-256-EAX      | 16 B  | 16 B   | 40 B           | 404 B             |
-| Triple               | 55 B  | 64 B   | 127 B          | 317 B             |
+| Triple               | 55 B  | 48 B   | 111 B          | 333 B             |
 
 Tailles de blocs pour les usages courants :
 
 | Plaintext (P) | XChaCha20 | DeoxysII | Serpent-EAX | Triple | Utilisation |
 |--------------:|----------:|---------:|------------:|-------:|-------------|
-| 32 B          | 80 B      | 71 B     | 72 B        | 159 B  | K_master (pw slot : toujours Triple) |
+| 32 B          | 80 B      | 71 B     | 72 B        | 143 B  | K_master (pw slot : toujours Triple) |
 | 96 B          | 144 B     | 135 B    | 136 B       | 223 B  | Clé privée protégée (.key) |
 | ≤ 32 716 B    | ≤ 32 764 B| ≤ 32 755 B | ≤ 32 756 B | ≤ 32 643 B | Payload d'un slot de données |
 
@@ -525,7 +525,7 @@ Algorithme : Argon2id, version 0x13 (NIST SP 800-232).
 | 0  | XChaCha20-Poly1305 (défaut)         | 192 bit  | 16 B   | 48 B          |
 | 1  | Deoxys-II-256                       | 120 bit  | 16 B   | 39 B          |
 | 2  | Serpent-256-EAX (CTR + OMAC)        | 128 bit  | 16 B   | 40 B          |
-| 3  | **Triple** (voir §7.3)              | 55 B (3×)| 64 B   | 127 B         |
+| 3  | **Triple** (voir §7.3)              | 55 B (3×)| 48 B   | 111 B         |
 
 Le nonce est généré aléatoirement à chaque écriture (non incrémental).
 Le cipher est **toujours caché** : byte 64 du header vaut 0, le vrai cipher est
@@ -538,23 +538,22 @@ un newtype `Serpent256` imposant `KeySize = U32` au lieu du `U16` par défaut du
 
 ### 7.3 Cipher Triple — détails
 
-Le cipher Triple (ID=3) applique trois couches de chiffrement successives.
-La couche 3 utilise Serpent en mode CTR manuel + HMAC-SHA256 (pas EAX) afin
-de conserver quatre subkeys 256 bits symétriques et un tag 32 B (vs 16 B pour EAX).
+Le cipher Triple (ID=3) applique trois couches de chiffrement EAX successives.
+Chaque couche utilise un mode AEAD indépendant avec sa propre clé dérivée et son
+propre tag 16 B — trois authentifications indépendantes par bloc.
 
 **Clés dérivées de K_master via HMAC-SHA256 :**
 
-| Couche | Algorithme | Clé | Nonce |
-|--------|-----------|----:|------:|
-| 1 | XChaCha20-Poly1305 | 32 B | 24 B |
-| 2 | Deoxys-II-256 | 32 B | 15 B |
-| 3 | Serpent-256-CTR + HMAC-SHA256 | 32 B + 32 B | 16 B |
+| Couche | Algorithme       | Clé  | Nonce |
+|--------|-----------------|-----:|------:|
+| 1      | XChaCha20-Poly1305 | 32 B | 24 B |
+| 2      | Deoxys-II-256      | 32 B | 15 B |
+| 3      | Serpent-256-EAX    | 32 B | 16 B |
 
 ```
-K1     = HMAC-SHA256(K_master, "\x01venom:triple:xchacha20")   — 32 B
-K2     = HMAC-SHA256(K_master, "\x02venom:triple:deoxys")      — 32 B
-K3_enc = HMAC-SHA256(K_master, "\x03venom:triple:serpent:enc") — 32 B
-K3_mac = HMAC-SHA256(K_master, "\x04venom:triple:serpent:mac") — 32 B
+K1 = HMAC-SHA256(K_master, "\x01venom:triple:xchacha20") — 32 B
+K2 = HMAC-SHA256(K_master, "\x02venom:triple:deoxys")    — 32 B
+K3 = HMAC-SHA256(K_master, "\x03venom:triple:serpent")   — 32 B
 ```
 
 **VNMB Triple block layout :**
@@ -562,14 +561,14 @@ K3_mac = HMAC-SHA256(K_master, "\x04venom:triple:serpent:mac") — 32 B
 ```
 [0..4]    magic b"VNMB"
 [4..8]    version u32 LE = 1
-[8..32]   nonce1 — 24 B (XChaCha20)
+[8..32]   nonce1 — 24 B (XChaCha20-Poly1305)
 [32..47]  nonce2 — 15 B (Deoxys-II-256)
-[47..63]  nonce3 — 16 B (Serpent-CTR)
-[63..]    encrypt(encrypt(encrypt(P))) + tag1(16) + tag2(16) + hmac(32)
+[47..63]  nonce3 — 16 B (Serpent-256-EAX)
+[63..]    encrypt3(encrypt2(encrypt1(P))) + tag1(16) + tag2(16) + tag3(16)
 ```
 
-Overhead total : 8 + 55 (nonces) + 64 (tags) = **127 B** par plaintext.
-`body_len(Triple)` = 444 − 127 = **317 B** (tient dans le header 512 B).
+Overhead total : 8 + 55 (nonces) + 48 (tags) = **111 B** par plaintext.
+`body_len(Triple)` = 444 − 111 = **333 B** (tient dans le header 512 B).
 
 ### 7.4 KEM hybride — X25519 + ML-KEM-1024
 
@@ -618,13 +617,13 @@ l'aveugle pour préserver l'anonymat des destinataires.
    (byte 64 ignoré — toujours 0 ; le cipher est découvert par sondage AEAD)
 
 2. Récupérer K_master depuis les slots :
-   a. Pour chaque password slot i à offset (1024 + i×192) :
+   a. Pour chaque password slot i à offset (1024 + i×176) :
         slot_key = Argon2id(password, salt=slot[0..32], profile=slot[32])  [1× par slot]
-        K_master = Triple_decrypt(slot_key, slot[33..192], aad=b"vnm:pw:v1")
+        K_master = Triple_decrypt(slot_key, slot[33..176], aad=b"vnm:pw:v1")
         Si échec → tenter les anciens ciphers {XChaCha20, DeoxysII, Serpent-EAX}
         Si succès → K_master obtenu
 
-   b. Pour chaque key slot j à offset (2560 + j×1759) :
+   b. Pour chaque key slot j à offset (2432 + j×1743) :
         shared_secret = ML-KEM-Decaps + X25519  [1× par slot]
         Pour chaque cipher {XChaCha20, DeoxysII, Serpent-EAX, Triple} :
           K_master = AEAD_decrypt(shared_secret, slot[1600..1600+E], aad=b"vnm:key:v1")

@@ -37,7 +37,7 @@ to `master`. There are no backport branches.
 | Default cipher | XChaCha20-Poly1305 — 192-bit random nonce (birthday bound 2⁹⁶) |
 | Alt cipher — Deoxys-II-256 | 120-bit random nonce (birthday bound 2⁶⁰); CAESAR "defense in depth" finalist |
 | Alt cipher — Serpent-256-EAX | 128-bit random nonce; EAX = CTR + OMAC (Serpent-based MAC, no external primitive) |
-| Triple cipher | XChaCha20-Poly1305 + Deoxys-II-256 + Serpent-256-CTR/HMAC — 127 B overhead per slot; all four subkeys 256-bit |
+| Triple cipher | XChaCha20-Poly1305 + Deoxys-II-256 + Serpent-256-EAX — 111 B overhead per slot; three 256-bit subkeys, each layer authenticated independently |
 | Password slot protection | **Always Triple** — `K_master` in password slots is wrapped with Triple regardless of the container's data cipher |
 | Integrity | 128-bit AEAD tag per slot (or 64 B for Triple) |
 | AAD | `slot_index as u64 LE` — binds ciphertext to physical location |
@@ -120,14 +120,14 @@ returned to the free list. Deleted files leave no recoverable ciphertext.
 | `chacha20poly1305 0.11-rc.3` | XChaCha20-Poly1305 (192-bit nonce) | RustCrypto, kept up to date |
 | `deoxys 0.2.0-rc.3` | Deoxys-II-256 AEAD (120-bit nonce) | RustCrypto, standalone cipher + Triple layer 2 |
 | `eax 0.6.0-rc.3` | EAX mode (CTR + OMAC) | RustCrypto, used with `Serpent256` newtype |
-| `serpent 0.6.0` | Serpent block cipher (128-bit blocks, 256-bit key) | RustCrypto; used in EAX mode (standalone) and manual CTR (Triple layer 3) |
+| `serpent 0.6.0` | Serpent block cipher (128-bit blocks, 256-bit key via `Serpent256` newtype) | RustCrypto; used in EAX mode for both standalone cipher and Triple layer 3 |
 | `cipher 0.5` | `BlockCipherEncrypt`, `BlockCipherEncClosure` traits | RustCrypto |
 | `hybrid-array 0.4` | `Array<u8, U16>` block type, typenum bounds | RustCrypto |
 | `ml-kem 0.3` | ML-KEM-1024 (FIPS 203) | RustCrypto, kept up to date |
 | `x25519-dalek 2` | X25519 ECDH | kept up to date |
 | `argon2 0.5` | Argon2id (RFC 9106) | RustCrypto, kept up to date |
 | `sha2 0.10` | SHA-256 (hybrid KEM combiner + subkey derivation) | RustCrypto, kept up to date |
-| `hmac 0.12` | HMAC-SHA256 (Triple cipher MAC + subkey derivation) | RustCrypto, kept up to date |
+| `hmac 0.12` | HMAC-SHA256 (Triple subkey derivation only — no longer used as MAC) | RustCrypto, kept up to date |
 | `zeroize` | Memory zeroing on drop | RustCrypto, kept up to date |
 | `libc` | `mlock(2)` / `munlock(2)` | Unix only, for K_master swap protection |
 
