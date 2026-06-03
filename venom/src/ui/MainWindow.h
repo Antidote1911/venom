@@ -56,8 +56,9 @@ private:
     VenomCore*       m_core;
     QVBoxLayout*     m_vaultLayout;
     QList<KeyEntry>  m_keys;
-    bool             m_containerPathManual  = false; ///< true once user picks a custom container path
-    bool             m_mountpointManual     = false; ///< true once user picks a custom mountpoint
+    bool             m_containerPathManual  = false;
+    bool             m_mountpointManual     = false;
+    QList<QWidget*>  m_vaultCards;  ///< dynamically created vault cards (not owned by layout directly)
 };
 
 } // namespace Venom

@@ -134,43 +134,37 @@ MainWindow::~MainWindow() { delete ui; }
 
 void MainWindow::refreshUnifiedVaultList()
 {
-    // Clear all existing cards
-    while (m_vaultLayout->count() > 0) {
-        QLayoutItem* item = m_vaultLayout->takeAt(0);
-        if (item->widget()) item->widget()->deleteLater();
-        delete item;
+    // Delete only the dynamically created cards — never touch permanent UI widgets
+    for (QWidget* card : qAsConst(m_vaultCards)) {
+        m_vaultLayout->removeWidget(card);
+        delete card;
     }
+    m_vaultCards.clear();
 
-    // Build a map: canonical path → MountedContainer (for mounted state)
+    // Mounted containers (any directory)
     const QList<MountedContainer> mounted = m_core->mountedContainers();
-    QHash<QString, MountedContainer> mountedByPath;
-    for (const auto& mc : mounted)
-        mountedByPath.insert(QFileInfo(mc.vaultPath).canonicalFilePath(), mc);
-
-    // Collect all entries: mounted first, then discovered-unmounted
     QStringList seenPaths;
-
-    // 1. Mounted containers (in any directory)
+    int insertPos = 0;
     for (const auto& mc : mounted) {
-        const QString canonical = QFileInfo(mc.vaultPath).canonicalFilePath();
-        seenPaths << canonical;
-        m_vaultLayout->addWidget(makeMountedCard(mc));
+        seenPaths << QFileInfo(mc.vaultPath).canonicalFilePath();
+        QWidget* card = makeMountedCard(mc);
+        m_vaultCards << card;
+        m_vaultLayout->insertWidget(insertPos++, card);
     }
 
-    // 2. Unmounted containers from default directory
+    // Unmounted containers from default directory
     QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     if (docs.isEmpty()) docs = QDir::homePath();
     const QDir dir(docs + QStringLiteral("/venom/"));
     const auto entries = dir.entryInfoList({QStringLiteral("*.vnm")}, QDir::Files, QDir::Name);
     for (const auto& fi : entries) {
         if (seenPaths.contains(fi.canonicalFilePath())) continue;
-        m_vaultLayout->addWidget(makeUnmountedCard(fi));
+        QWidget* card = makeUnmountedCard(fi);
+        m_vaultCards << card;
+        m_vaultLayout->insertWidget(insertPos++, card);
     }
 
-    // Trailing spacer
-    m_vaultLayout->addStretch();
-
-    ui->lblEmptyState->setVisible(mounted.isEmpty() && entries.isEmpty());
+    ui->lblEmptyState->setVisible(m_vaultCards.isEmpty());
 }
 
 QWidget* MainWindow::makeMountedCard(const MountedContainer& mc)
