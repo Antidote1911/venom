@@ -10,7 +10,8 @@ indistinguishable from encrypted data, enabling plausible deniability.
 
 ## Features
 
-- **AEAD encryption** — XChaCha20-Poly1305 (192-bit nonce, default), AES-256-GCM (128-bit nonce), or **Triple** (XChaCha20 + Deoxys-II-256 + Serpent-CTR/HMAC); one or three auth tags per 30 KB slot
+- **AEAD encryption** — four cipher choices (see table below); one or three auth tags per 32 KB slot
+- **Password slot protection** — `K_master` in password slots is **always** wrapped with Triple encryption regardless of the container cipher
 - **Cipher anonymity** — cipher choice is never exposed in plaintext; discovered blindly via AEAD on open
 - **Memory-hard KDF** — Argon2id (interactive: 64 MiB / sensitive: 256 MiB)
 - **Post-quantum recipients** — X25519 + ML-KEM-1024 hybrid KEM (NIST FIPS 203)
@@ -23,18 +24,25 @@ indistinguishable from encrypted data, enabling plausible deniability.
 - **FUSE mount** — containers mount as a regular directory on Linux
 - **Qt6 GUI** — create, mount, unmount, manage recipients
 
+### Cipher algorithms
+
+| ID | Algorithm | Nonce | Tag | Overhead | Notes |
+|---:|-----------|------:|----:|--------:|-------|
+| 0 | XChaCha20-Poly1305 | 192 bit | 16 B | 48 B | Default; birthday bound 2⁹⁶ |
+| 1 | Deoxys-II-256 | 120 bit | 16 B | 39 B | CAESAR "defense in depth" finalist |
+| 2 | Serpent-256-EAX | 128 bit | 16 B | 40 B | EAX = CTR + OMAC (Serpent-based) |
+| 3 | Triple (cascade) | 55 B (3×) | 64 B | 127 B | XChaCha20 → Deoxys-II-256 → Serpent-256-CTR/HMAC |
+
 ---
 
 ## Comparison with VeraCrypt
 
 | Property | VeraCrypt | Venom |
 |----------|:---------:|:-----:|
-| Property | VeraCrypt | Venom |
-|----------|:---------:|:-----:|
-| **Encryption mode** | XTS-AES (no integrity) | AEAD per slot (XChaCha20 / AES-256-GCM / **Triple**) |
-| **Per-block authentication** | ✗ silent corruption possible | ✓ 128-bit tag, decryption fails on tampering |
+| **Encryption mode** | XTS-AES (no integrity) | AEAD per slot (XChaCha20 / Deoxys-II-256 / Serpent-EAX / **Triple**) |
+| **Per-block authentication** | ✗ silent corruption possible | ✓ 128-bit tag (or 64 B Triple), decryption fails on tampering |
 | **Slot-swap / relocation attack** | ✗ | ✓ slot index as AAD |
-| **Nonce** | Deterministic (sector number) | 192-bit random (XChaCha20) / 128-bit random (AES) |
+| **Nonce** | Deterministic (sector number) | Random per write (120–192 bit depending on cipher) |
 | **Cipher anonymity** | N/A | ✓ cipher_id always 0; real cipher discovered blindly |
 | **KDF** | PBKDF2-SHA512 | Argon2id (memory-hard, RFC 9106) |
 | **GPU/ASIC resistance** | ✗ CPU-bound only | ✓ 64–256 MiB RAM required per guess |
@@ -62,6 +70,8 @@ indistinguishable from encrypted data, enabling plausible deniability.
 
 Each 32 KB slot is independently encrypted with a fresh random nonce and
 authenticated with `slot_index` as AAD (prevents slot-swap attacks).
+Password slots always use Triple encryption to protect `K_master` regardless
+of the container's data cipher.
 See [`FORMAT.md`](FORMAT.md) for the full binary format specification and
 [`SECURITY.md`](SECURITY.md) for the security policy and known limitations.
 
@@ -109,11 +119,11 @@ Or open the `venom/` directory in Qt Creator.
 VnmContainer::create(
     "vault.vnm",
     b"my-password",
-    512 * 1024 * 1024,          // 512 MB
-    CipherAlgorithm::XChaCha20Poly1305, // or ::Aes256Gcm or ::Triple
+    512 * 1024 * 1024,               // 512 MB
+    CipherAlgorithm::XChaCha20Poly1305, // ::DeoxysII256 | ::Serpent256 | ::Triple
     "interactive",
     Some("My vault".into()),
-    None,                        // no hidden volume
+    None,                             // no hidden volume
 )?;
 ```
 

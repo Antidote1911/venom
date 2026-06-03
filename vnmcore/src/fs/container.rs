@@ -160,7 +160,7 @@ impl VnmContainer {
             rand::thread_rng().fill_bytes(&mut hid_container_id);
 
             // Password slot for hidden volume
-            let pw_slot = encode_password_slot(&k_hidden, h.password, hid_kdf_id, cipher)?;
+            let pw_slot = encode_password_slot(&k_hidden, h.password, hid_kdf_id)?;
 
             let hid_payload = HeaderPayload {
                 cipher, kdf_profile: hid_kdf_id,
@@ -261,7 +261,7 @@ impl VnmContainer {
 
         // 4. Write password recipient slot (only when a password is provided)
         if has_password {
-            let pw_slot = encode_password_slot(&k_outer, outer_password, kdf_id, cipher)?;
+            let pw_slot = encode_password_slot(&k_outer, outer_password, kdf_id)?;
             write_recipient_slot(path, 0, &pw_slot)?;
         }
         // Remaining slots stay as random bytes (already filled in step 1)
@@ -323,9 +323,9 @@ impl VnmContainer {
             (n_pw0, n_key0)
         };
 
-        // Cipher is discovered by trying all supported ciphers during slot decryption.
-        // Argon2id (password) or ML-KEM decapsulation runs once per slot; only AEAD
-        // verification is repeated for each cipher candidate.
+        // K_master is recovered from the credential slot. The container cipher is then
+        // discovered separately by probing all supported ciphers against the header, because
+        // password slots always use Triple regardless of the container cipher.
         let k_outer = match &credential {
             OpenCredential::Password(pw)     => try_pw_slots(path, pw, n_pw),
             OpenCredential::PrivateKey(priv_) => try_key_slots(path, priv_, n_key),
@@ -333,31 +333,38 @@ impl VnmContainer {
 
         // Try to authenticate against each header copy (cheap AEAD, no extra KDF).
         // Order: primary → EOF-512 backup → EOF-1024 backup.
-        if let Some((k, cipher)) = k_outer {
+        const HEADER_CIPHERS: &[CipherAlgorithm] = &[
+            CipherAlgorithm::XChaCha20Poly1305,
+            CipherAlgorithm::DeoxysII256,
+            CipherAlgorithm::Serpent256,
+            CipherAlgorithm::Triple,
+        ];
+        if let Some((k, _)) = k_outer {
             let offsets = [0u64, file_size.saturating_sub(512), file_size.saturating_sub(1024)];
             for &off in &offsets {
                 if let Ok(raw) = read_512_at(path, off) {
-                    if let Ok(meta) = decode_header(&raw, &k, cipher, false) {
-                        let has_gen = meta.container_id != [0u8; 16];
-                        let store = open_store(path, k.clone(), meta.cipher, 0, meta.outer_slots, OUTER_ALLOC_SLOT, has_gen)?;
-                        store.load_free_list()?;
-                        // Anti-rollback check
-                        if has_gen {
-                            RollbackState::load().check(&meta.container_id, store.current_generation())?;
+                    for &cipher in HEADER_CIPHERS {
+                        if let Ok(meta) = decode_header(&raw, &k, cipher, false) {
+                            let has_gen = meta.container_id != [0u8; 16];
+                            let store = open_store(path, k.clone(), meta.cipher, 0, meta.outer_slots, OUTER_ALLOC_SLOT, has_gen)?;
+                            store.load_free_list()?;
+                            if has_gen {
+                                RollbackState::load().check(&meta.container_id, store.current_generation())?;
+                            }
+                            return Ok(VnmContainer {
+                                root_slot:    meta.root_slot,
+                                is_hidden:    false,
+                                cipher:       meta.cipher,
+                                outer_slots:  meta.outer_slots,
+                                outer_limit:  meta.outer_slots,
+                                label:        label_from(meta.label),
+                                created_at:   meta.created_at,
+                                k_master:     k,
+                                store,
+                                path:         path.to_path_buf(),
+                                container_id: meta.container_id,
+                            });
                         }
-                        return Ok(VnmContainer {
-                            root_slot:    meta.root_slot,
-                            is_hidden:    false,
-                            cipher:       meta.cipher,
-                            outer_slots:  meta.outer_slots,
-                            outer_limit:  meta.outer_slots,
-                            label:        label_from(meta.label),
-                            created_at:   meta.created_at,
-                            k_master:     k,
-                            store,
-                            path:         path.to_path_buf(),
-                            container_id: meta.container_id,
-                        });
                     }
                 }
             }
@@ -422,7 +429,7 @@ impl VnmContainer {
         if n_pw as usize >= MAX_PASSWORD_SLOTS {
             return Err(VnmError::InvalidFormat("max password recipients reached".into()));
         }
-        let slot = encode_password_slot(&self.k_master, new_password, kdf_profile, self.cipher)?;
+        let slot = encode_password_slot(&self.k_master, new_password, kdf_profile)?;
         write_recipient_slot(&self.path, n_pw as usize, &slot)?;
         update_slot_counts(&self.path, n_pw + 1, n_key, &self.k_master, self.cipher, &raw)?;
         Ok(())
@@ -632,7 +639,7 @@ fn update_slot_counts(
 fn try_hidden_at(path: &Path, hdr_offset: u64, password: &[u8]) -> Option<(LockedMemory<[u8; 32]>, HeaderPayload)> {
     let raw = read_512_at(path, hdr_offset).ok()?;
     let k   = derive_hidden_key(&raw, password).ok()?;
-    for &cipher in &[CipherAlgorithm::XChaCha20Poly1305, CipherAlgorithm::Aes256Gcm] {
+    for &cipher in &[CipherAlgorithm::XChaCha20Poly1305, CipherAlgorithm::DeoxysII256, CipherAlgorithm::Serpent256, CipherAlgorithm::Triple] {
         if let Ok(meta) = decode_header(&raw, &*k, cipher, true) {
             return Some((k, meta));
         }

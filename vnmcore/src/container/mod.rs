@@ -17,16 +17,20 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum CipherAlgorithm {
     XChaCha20Poly1305 = 0,
-    Aes256Gcm         = 1,
+    /// Deoxys-II-256 standalone AEAD (256-bit key, 15-byte nonce)
+    DeoxysII256       = 1,
+    /// Serpent-256-EAX (CTR + OMAC, 16-byte nonce + 16-byte tag)
+    Serpent256        = 2,
     /// XChaCha20-Poly1305 → Deoxys-II-256 → Serpent-256-CTR + HMAC-SHA256
-    Triple            = 2,
+    Triple            = 3,
 }
 
 impl CipherAlgorithm {
     pub fn as_str(self) -> &'static str {
         match self {
             CipherAlgorithm::XChaCha20Poly1305 => "xchacha20-poly1305",
-            CipherAlgorithm::Aes256Gcm         => "aes-256-gcm",
+            CipherAlgorithm::DeoxysII256       => "deoxys-ii-256",
+            CipherAlgorithm::Serpent256        => "serpent-256-eax",
             CipherAlgorithm::Triple            => "triple-xchacha20-deoxys-serpent",
         }
     }

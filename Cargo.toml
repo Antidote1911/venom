@@ -10,8 +10,8 @@ license = "MIT"
 
 [workspace.dependencies]
 # Crypto
-aes-gcm           = "0.11.0-rc.4"
 chacha20poly1305  = "0.11.0-rc.3"
+eax               = "0.6.0-rc.3"
 deoxys            = "0.2.0-rc.3"
 serpent           = "0.6.0"
 ctr               = "0.10.1"

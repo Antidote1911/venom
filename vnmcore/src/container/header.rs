@@ -3,7 +3,7 @@
 //! ## Layout (512 bytes)
 //!
 //!   [0..64]    salt (64 bytes, plaintext — for Argon2id / key derivation)
-//!   [64]       cipher_id (0=XChaCha20-Poly1305, 1=AES-256-GCM-16)
+//!   [64]       cipher_id (always 0 — cipher hidden; discovered via AEAD probing)
 //!   [65]       kdf_profile_id (0=interactive, 1=sensitive)
 //!   [66]       num_password_slots (u8, plaintext — max MAX_PASSWORD_SLOTS)
 //!   [67]       num_key_slots (u8, plaintext — max MAX_KEY_SLOTS)
@@ -75,9 +75,10 @@ pub(crate) const BODY_AVAILABLE: usize = HEADER_SIZE - BODY_OFFSET;
 /// Must satisfy: vnmb_overhead(cipher) + body_len(cipher) ≤ BODY_AVAILABLE.
 pub(crate) fn body_len(cipher: CipherAlgorithm) -> usize {
     BODY_AVAILABLE - vnmb_overhead(cipher)
-    // Triple: 444 - (8+55+64) = 444 - 127 = 317
-    // XChaCha20: 444 - (8+24+16) = 444 - 48 = 396
-    // AES-256-GCM: 444 - (8+16+16) = 444 - 40 = 404 (but we keep parity with XChaCha20)
+    // Triple:         444 - (8+55+64) = 317
+    // XChaCha20:      444 - (8+24+16) = 396
+    // DeoxysII:       444 - (8+15+16) = 405
+    // Serpent256-EAX: 444 - (8+16+16) = 404
 }
 
 /// Default BODY_LEN used for single-cipher non-triple containers.

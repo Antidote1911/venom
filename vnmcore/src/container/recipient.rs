@@ -2,14 +2,19 @@
 //!
 //! ## Password slot
 //!
+//! Password slots always use Triple encryption (strongest protection).
+//!
 //!   [0..32]   salt        — Argon2id salt, unique per slot
 //!   [32]      kdf_profile — 0=interactive, 1=sensitive
 //!   [33..33+E] VNMB encrypted K_master   AAD: b"vnm:pw:v1"
 //!   [33+E..PW_SLOT_SIZE] zero padding
 //!
-//!   E = vnmb_enc_32(cipher):
-//!     XChaCha20-Poly1305: 32 + 32 + 16 = 80  →  PW_SLOT_SIZE = 113
-//!     AES-256-GCM:        20 + 32 + 16 = 68  →  (padded to 113)
+//!   E = vnmb_enc_32(Triple) = 8+55+32+64 = 159  →  PW_SLOT_SIZE = 192
+//!
+//!   Other ciphers for reference:
+//!     XChaCha20: 8+24+32+16 = 80
+//!     DeoxysII:  8+15+32+16 = 71
+//!     Serpent256-EAX: 8+16+32+16 = 72
 //!
 //! ## Hybrid key slot — X25519 + ML-KEM-1024
 //!
@@ -20,7 +25,7 @@
 //!   [1600..1600+E] VNMB encrypted K_master   AAD: b"vnm:key:v1"
 //!   [1600+E..KEY_SLOT_SIZE] zero padding
 //!
-//!   KEY_SLOT_SIZE = 32 + 1568 + 80 = 1680 (using XChaCha20 max)
+//!   KEY_SLOT_SIZE = 32 + 1568 + 159 = 1759 (using Triple max)
 
 use crate::Result;
 use crate::container::CipherAlgorithm;
@@ -50,7 +55,7 @@ const AAD_KEY: &[u8] = b"vnm:key:v1";
 // ── Password slot ─────────────────────────────────────────────────────────────
 
 pub fn encode_password_slot(
-    k_master: &[u8; 32], password: &[u8], kdf_profile: u8, cipher: CipherAlgorithm,
+    k_master: &[u8; 32], password: &[u8], kdf_profile: u8,
 ) -> Result<[u8; PW_SLOT_SIZE]> {
     let mut buf = [0u8; PW_SLOT_SIZE];
     let mut salt = [0u8; 32];
@@ -61,15 +66,18 @@ pub fn encode_password_slot(
     kdf.salt = hex::encode(&salt);
     let dk = derive_key(password, &kdf)?;
     let key: [u8; 32] = dk.as_array_32().unwrap();
-    let enc = encrypt_block(&key, cipher, AAD_PW, k_master)?;
+    let enc = encrypt_block(&key, CipherAlgorithm::Triple, AAD_PW, k_master)?;
     buf[33..33 + enc.len()].copy_from_slice(&enc);
-    // Remaining bytes stay as zero padding (buf was zero-initialised)
     Ok(buf)
 }
 
-/// Ciphers tried in order during blind decryption (single-cipher containers only).
-const ALL_CIPHERS: &[CipherAlgorithm] =
-    &[CipherAlgorithm::XChaCha20Poly1305, CipherAlgorithm::Aes256Gcm, CipherAlgorithm::Triple];
+/// Ciphers tried in order during blind decryption of key slots.
+const ALL_CIPHERS: &[CipherAlgorithm] = &[
+    CipherAlgorithm::XChaCha20Poly1305,
+    CipherAlgorithm::DeoxysII256,
+    CipherAlgorithm::Serpent256,
+    CipherAlgorithm::Triple,
+];
 
 /// Attempt to decrypt K_master from a password slot without knowing the cipher.
 ///

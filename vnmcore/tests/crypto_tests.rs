@@ -29,13 +29,25 @@ fn chacha20_round_trip() {
 }
 
 #[test]
-fn aes256gcm_round_trip() {
+fn deoxys_ii_256_round_trip() {
     let key = derive_test_key(b"hunter2");
-    let plaintext = b"AES is also fine";
+    let plaintext = b"Deoxys-II-256 standalone";
     let block_id = b"test-block-002";
 
-    let ciphertext = encrypt_block(&key, CipherAlgorithm::Aes256Gcm, block_id, plaintext).unwrap();
-    let recovered = decrypt_block(&key, CipherAlgorithm::Aes256Gcm, block_id, &ciphertext).unwrap();
+    let ciphertext = encrypt_block(&key, CipherAlgorithm::DeoxysII256, block_id, plaintext).unwrap();
+    let recovered = decrypt_block(&key, CipherAlgorithm::DeoxysII256, block_id, &ciphertext).unwrap();
+
+    assert_eq!(recovered, plaintext);
+}
+
+#[test]
+fn serpent256_round_trip() {
+    let key = derive_test_key(b"hunter2");
+    let plaintext = b"Serpent-256-EAX authenticated";
+    let block_id = b"test-block-003";
+
+    let ciphertext = encrypt_block(&key, CipherAlgorithm::Serpent256, block_id, plaintext).unwrap();
+    let recovered = decrypt_block(&key, CipherAlgorithm::Serpent256, block_id, &ciphertext).unwrap();
 
     assert_eq!(recovered, plaintext);
 }
@@ -71,12 +83,11 @@ fn flipped_bit_detected() {
     let plaintext = b"integrity check";
     let block_id = b"test-block-005";
 
-    let mut ciphertext = encrypt_block(&key, CipherAlgorithm::Aes256Gcm, block_id, plaintext).unwrap();
-    // Flip a bit in the ciphertext payload
+    let mut ciphertext = encrypt_block(&key, CipherAlgorithm::DeoxysII256, block_id, plaintext).unwrap();
     let len = ciphertext.len();
     ciphertext[len - 17] ^= 0xFF;
 
-    let result = decrypt_block(&key, CipherAlgorithm::Aes256Gcm, block_id, &ciphertext);
+    let result = decrypt_block(&key, CipherAlgorithm::DeoxysII256, block_id, &ciphertext);
     assert!(result.is_err(), "tampered ciphertext must be rejected");
 }
 

@@ -448,12 +448,22 @@
                  <widget class="QComboBox" name="cbCipher">
                   <item>
                    <property name="text">
-                    <string>ChaCha20-Poly1305</string>
+                    <string>XChaCha20-Poly1305</string>
                    </property>
                   </item>
                   <item>
                    <property name="text">
-                    <string>AES-256-GCM</string>
+                    <string>Deoxys-II-256</string>
+                   </property>
+                  </item>
+                  <item>
+                   <property name="text">
+                    <string>Serpent-256-EAX</string>
+                   </property>
+                  </item>
+                  <item>
+                   <property name="text">
+                    <string>Triple (cascade)</string>
                    </property>
                   </item>
                  </widget>

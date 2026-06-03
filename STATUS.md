@@ -1,6 +1,6 @@
 # Venom — Project Status
 
-> Last updated: 2026-06-02
+> Last updated: 2026-06-03
 
 ## What is Venom?
 
@@ -17,20 +17,17 @@ each with their own credential (password or post-quantum hybrid private key).
 venom/
 ├── vnmcore/      Core library: crypto, slot store, virtual filesystem, OS drivers
 │   ├── src/
-│   │   ├── container/   header v1, CipherAlgorithm, KdfParams, recipient slots
-│   │   ├── crypto/      Argon2id KDF, AES-256-GCM / ChaCha20-Poly1305,
+│   │   ├── container/   header v1, CipherAlgorithm (4 ciphers), KdfParams, recipient slots
+│   │   ├── crypto/      Argon2id KDF, XChaCha20 / Deoxys-II-256 / Serpent-256-EAX / Triple,
 │   │   │                hybrid_kem (X25519 + ML-KEM-1024), key file format
 │   │   ├── storage/     SlotStore, VaultNode, DirectoryBlock, FileBlock
 │   │   └── fs/          VnmContainer API, FUSE (Unix), WinFSP (Windows)
-│   ├── tests/           28 integration tests
+│   ├── tests/           41 integration tests
 │   └── examples/        mount_test — diagnostic CLI tool
-└── venom/        GUI application (egui 0.28 / eframe)
+└── venom/        Qt6/C++20 frontend
     └── src/
-        ├── app/         state, actions
-        ├── ui/          theme, topbar, vault_list, create, mount,
-        │                recipients, key_manager, statusbar
-        ├── keystore.rs  local hybrid-key storage (~/.config/venom/keys/)
-        └── recent.rs    recent containers (~/.config/venom/recent.json)
+        ├── backend/     VenomCore (Qt↔FFI bridge), MountWorker
+        └── ui/          MainWindow (.ui + .cpp)
 ```
 
 ---
@@ -40,22 +37,39 @@ venom/
 ### Container format — `.vnm` (version 1, definitive)
 
 ```
-[0..512]      Outer header (VNM1) — encrypted with K_master
-[512..1024]   Random reserved bytes
-[1024..15240] Recipient area (fixed, 14 216 bytes):
-                8 × 101 B    Password slots: salt(32)+profile(1)+AEAD(K_master,68B)
-                8 × 1676 B   Hybrid key slots: fp(8)+x25519_eph(32)+mlkem_ct(1568)+AEAD(68B)
-[15240..]     Data slots (32 KB each)
-[end-512..end] Hidden header (VNM1) or random bytes
+[0..512]         Outer header (VNM1) — encrypted with K_master
+[512..1024]      Hidden header backup (or random bytes)
+[1024..2560]     Password recipient area: 8 × 192 B
+                   salt(32) + profile(1) + Triple_AEAD(K_master, 159B)
+                   Password slots always use Triple regardless of container cipher.
+[2560..16632]    Hybrid key recipient area: 8 × 1759 B
+                   x25519_eph_pk(32) + mlkem_ct(1568) + AEAD(K_master, ≤159B)
+[16632..]        Data slots (32 KB each)
+[EOF-1024..EOF-512]  Outer header backup
+[EOF-512..EOF]   Hidden header primary (or random bytes)
 ```
 
 **Key design**: `K_master` is a random 32-byte key, never derived from a password.
 Credentials only serve to decrypt `K_master`. Adding or revoking a recipient
 **never re-encrypts any data**.
 
-- [x] Slot layout, header format, allocation bitmap, linked-list file chain — see previous versions
+- [x] Slot layout, header format, allocation bitmap, file chain — definitive
 - [x] **Format V1 is definitive** — all intermediate development versions removed
 - [x] Serialization: MessagePack (`rmp-serde`, named fields) — readable from any language
+- [x] Header backup: outer at EOF-512/EOF-1024 (geographic separation), hidden at [512..1024]
+- [x] Anti-rollback: monotonic generation counter in allocation block + `~/.config/venom/rollback.json`
+
+### Cipher algorithms
+
+| ID | Algorithm | Notes |
+|---:|-----------|-------|
+| 0 | XChaCha20-Poly1305 | Default; 192-bit nonce |
+| 1 | Deoxys-II-256 | CAESAR finalist; 120-bit nonce |
+| 2 | Serpent-256-EAX | EAX = CTR + OMAC; 128-bit nonce |
+| 3 | Triple (cascade) | XChaCha20 → Deoxys-II-256 → Serpent-256-CTR/HMAC |
+
+Password slots always use Triple encryption for `K_master`.
+Cipher is never stored in plaintext — discovered by blind AEAD probing on open.
 
 ### Security hardening vs VeraCrypt
 
@@ -70,7 +84,9 @@ Credentials only serve to decrypt `K_master`. Adding or revoking a recipient
 | Hidden volume deniability | ✓ | ✓ |
 | Multi-recipient | ✗ | ✓ |
 | Post-quantum + classical hybrid | ✗ | ✓ |
-| Header backup | ✓ | ✗ TODO |
+| Header backup | ✓ | ✓ outer + hidden |
+| Anti-rollback | ✗ | ✓ |
+| K_master always Triple-wrapped | ✗ | ✓ password slots |
 
 Full analysis: see `SECURITY.md`.
 
@@ -105,17 +121,16 @@ If quantum computers break X25519 → ML-KEM-1024 still holds.
 If ML-KEM-1024 has a classical weakness → X25519 still holds.
 
 - [x] `hybrid_generate()` → `HybridPrivateKey { x25519_sk, x25519_pk, mlkem_seed, mlkem_ek }`
-  X25519 and ML-KEM-1024 keys are generated independently from separate random sources.
 - [x] `hybrid_encapsulate(pub)` → `(x25519_eph_pk, mlkem_ct, hybrid_key)`
 - [x] `hybrid_decapsulate(priv, x25519_eph_pk, mlkem_ct)` → `hybrid_key`
-- [x] `fingerprint` = `SHA-256(x25519_pk || mlkem_ek)[0..8]` — binds to BOTH public keys
-- [x] Password slots (up to 8) — independent Argon2id salt per slot
-- [x] Hybrid key slots (up to 8) — fingerprint for O(1) rejection before decapsulation
+- [x] `fingerprint` = `SHA-256(x25519_pk || mlkem_ek)[0..8]`
+- [x] Password slots (up to 8) — independent Argon2id salt per slot, always Triple-encrypted
+- [x] Hybrid key slots (up to 8) — blind AEAD probing (all 4 ciphers) on open
 - [x] `VnmContainer::open(path, OpenCredential::Password(pw))`
 - [x] `VnmContainer::open(path, OpenCredential::PrivateKey(&hybrid_key))`
 - [x] `add_key_recipient(&HybridPublicKey)` — no data re-encryption
 - [x] `remove_key_recipient(&fingerprint)` — wipes slot with random bytes
-- [x] `list_recipients()` → type + fingerprint per slot
+- [x] `list_recipients()` → type + slot_index per slot
 
 ### Hybrid key file format
 
@@ -129,47 +144,24 @@ b"VKEY" + version u32 + created_at u64 + label[64] + fingerprint[8]
         + x25519_sk[32] + mlkem_seed[64]   ← private, plaintext
 ```
 
-*Passphrase-protected* (1 886 bytes — private scalars encrypted):
+*Passphrase-protected* (1 898 bytes — private scalars encrypted):
 ```
 b"VKEY" + version + created_at + label + fingerprint
         + x25519_pk[32] + mlkem_ek[1568]   ← PUBLIC, always in plaintext
         + protected=1
         + argon2_salt[64] + kdf_profile[1]
-        + encrypt_block(                    ← private, ChaCha20-Poly1305 AEAD
+        + encrypt_block(                    ← private, XChaCha20-Poly1305 AEAD
             Argon2id(passphrase, salt),
             aad = "vnm:key:protect:v1",
             x25519_sk[32] || mlkem_seed[64]
-          ) = 132 bytes
+          ) = 144 bytes
 ```
-
-**Design principle**: public portions (`x25519_pk`, `mlkem_ek`) are **always in
-plaintext** regardless of protection — recipient management and fingerprint display
-work without a passphrase. Only private scalars are encrypted.
 
 **`.pub`** — public portion only, 1 688 bytes (safe to share freely):
 ```
 b"VPUB" + version u32 + created_at u64 + label[64] + fingerprint[8]
         + x25519_pk[32] + mlkem_ek[1568]
 ```
-
-The `.pub` is exported on demand from the Key Manager.
-
-### Local key store (`~/.config/venom/keys/`)
-
-Files: `<fingerprint_hex>.key` (private+public bundle)
-
-| Method | Action |
-|---|---|
-| `generate(label)` | Creates X25519 + ML-KEM-1024 independently, saves unprotected `.key` |
-| `generate_protected(label, passphrase, profile)` | Same, with passphrase protection |
-| `import_key(path)` | Imports a `.key` file from backup or another machine |
-| `export_pub(fp, dest)` | Writes the `.pub` file for sharing |
-| `protect(fp, old_pw, new_pw, profile)` | Add or change passphrase on existing key |
-| `unprotect(fp, passphrase)` | Remove passphrase protection |
-| `remove(fp)` | Deletes the `.key` file |
-| `get_key(fp)` | Returns private key (fails if passphrase-protected) |
-| `get_key_with_passphrase(fp, pw)` | Decrypts and returns private key |
-| `get_public(fp)` | Returns public key (always works, no passphrase needed) |
 
 ### VnmContainer API
 
@@ -196,71 +188,21 @@ container.read_node / write_node / update_node / free_node / flush
 - [x] Case-insensitive paths, FILETIME, drive-letter mount, `Mutex<Inner>`
 - [x] Requires WinFSP installed (https://winfsp.dev)
 
-### Tests — 27 total, all passing
+### Tests — 41 total, all passing
 
 | Suite | Count | Covers |
 |-------|------:|--------|
-| `crypto_tests` | 8 | ChaCha20/AES AEAD, wrong key, AAD binding, tamper, KDF |
-| `container_tests` | 11 | create/open (both ciphers), wrong password, CRUD, persistence, hidden volume, hybrid KEM round-trip, add hybrid recipient + open with private key, multiple recipients, **key file passphrase protect/unprotect round-trip, wrong passphrase rejected, public readable without passphrase** |
-| `fuse_cache_tests` (inline) | 9 | cache lifecycle + large-file linked-list (75 KB) |
+| `crypto_tests` | 14 | XChaCha20 / Deoxys-II-256 / Serpent-256-EAX / Triple AEAD, wrong key, AAD binding, tamper, KDF, Triple container create/open |
+| `container_tests` | 16 | create/open (all 4 ciphers), wrong password, CRUD, persistence, hidden volume, hybrid KEM, add recipient, multiple recipients, key file passphrase, rollback detection |
+| `fuse_cache_tests` (inline) | 11 | cache lifecycle, large-file chunk roundtrip, write-through, rename, unlink |
 
-### GUI (egui 0.28)
+### GUI — Qt6/C++20
 
-#### Key Manager (`Screen::KeyManager`)
-- [x] **🗝 Keys** button in topbar with keypair-count badge (purple)
-- [x] **Key list** — each entry as a card:
-  - `🔒🔑` (passphrase-protected, green badge) or `🔑` (unprotected, orange badge)
-  - Label, fingerprint `ab:cd:ef:01:23:45:67:89` (purple monospace), creation date
-  - `[📤 Export .pub]` — save dialog → `.pub` file to share
-  - `[▼ Passphrase]` toggle — reveals the passphrase management panel
-  - `[Delete]` — removes the `.key` file
-- [x] **Passphrase management panel** (per selected key):
-  - Unprotected key: new passphrase + confirm + KDF profile + `🔒 Add passphrase protection`
-  - Protected key: current passphrase field + `🔓 Remove protection`
-- [x] **Generate panel** — label field + optional passphrase (checkbox → fields + profile)
-  + `⚡ Generate keypair`
-- [x] **Import panel** — `[📥 Import .key file]` — copies to store, reads metadata without passphrase
-
-#### Recipients screen (`Screen::Recipients`)
-- [x] Lists current password and hybrid key slots per mounted container
-- [x] Add password recipient / add hybrid key recipient (browse `.pub`)
-- [x] Remove hybrid recipient by fingerprint
-
-#### Create form
-- [x] Two-column layout; save-as browser (`.vnm`); size field; KDF profile cards
-- [x] **Key recipients panel** — checkboxes for each known keypair; password becomes
-  optional when at least one recipient is selected (key-only container supported)
-- [x] Hidden volume section; live size validation; passphrase match indicator
-- [x] "Create container" button disabled until form is valid
-
-#### Mount form
-- [x] **Credential toggle `🔒 Password / 🔑 Private key`**:
-  - Password mode: passphrase field (outer or hidden volume)
-  - Private key mode: scrollable list of keypairs from local store; click to select;
-    passphrase field appears when selected key is passphrase-protected;
-    button activates when key selected (+ passphrase if needed)
-- [x] `📄 Open file` (blue) / `📁 Folder…` (grey) pickers
-- [x] Recent containers quick-fill panel
-
-#### Vault list / lifecycle
-- [x] Vault cards: `🔐 hidden` badge, `👥 Recipients` button
-- [x] Async mount thread; `Mounting → Mounted → Gone / Error` state machine
-- [x] Open folder fallback chain; path existence check
-
-#### Bug fixes
-- [x] **Key deletion persistence** — `remove()` now returns `Result<(), String>`,
-  surfaces errors in status bar; tries both filename formats (with/without colons)
-  for backward compatibility
-- [x] **Layout truncation** — `ui.available_width()` inside `ScrollArea::vertical()`
-  inflates column widths. Fixed by:
-  - Calculating column width **before** the `ScrollArea`
-  - Using `ui.set_max_width(avail)` inside scroll areas
-  - `allocate_ui_with_layout(Vec2::new(col, ∞), ...)` for explicit column sizing
-  - `profile_card` uses `ui.set_width(col - 24.0)` instead of `set_min_width(available)`
-
-#### Recent containers / UI design
-- [x] Recent containers (10 entries, JSON)
-- [x] Custom dark theme, topbar badges
+- [x] Create container: path, size, **4 cipher choices** (XChaCha20-Poly1305 / Deoxys-II-256 / Serpent-256-EAX / Triple), KDF profile, label, key recipients
+- [x] Mount with password or private key (`.key` file + passphrase)
+- [x] Unmount; vault cards showing cipher name, creation date, label
+- [x] Key Manager: generate, import, export `.pub`, passphrase protection
+- [x] Add/remove recipients on open container
 
 ---
 
@@ -275,12 +217,9 @@ container.read_node / write_node / update_node / free_node / flush
 - [ ] **Volume size limit** — bitmap must fit in one slot (≈ 8 GB per volume).
 - [ ] **Password zeroization** — GUI password fields are plain `String`.
 - [ ] **Async create** — random-fill + KDF blocks the UI thread.
-- [ ] **Header backup** — corruption = total data loss.
 
 ### GUI
 
-- [ ] **Key integration with Recipients screen** — use the local key store to
-  select a recipient by label/fingerprint instead of browsing for a raw `.pub`
 - [ ] Progress bar during container creation
 - [ ] Outer safe-fill warning for hidden volumes
 - [ ] Vault browser panel, tray icon, auto-unmount on idle
@@ -294,7 +233,6 @@ container.read_node / write_node / update_node / free_node / flush
 
 ### Testing & CI
 
-- [ ] Restore `fuse_ops_tests` (29 tests lost in format migration)
 - [ ] Property-based tests, FUSE smoke test, benchmarks
 - [ ] GitHub Actions CI
 

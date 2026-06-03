@@ -28,12 +28,22 @@ fn create_and_reopen_chacha() {
 }
 
 #[test]
-fn create_and_reopen_aes() {
-    let path = tmp("aes");
+fn create_and_reopen_deoxys() {
+    let path = tmp("deoxys");
     let _ = std::fs::remove_file(&path);
-    VnmContainer::create(&path, b"pass", 4*MB, CipherAlgorithm::Aes256Gcm, "interactive", None, None).unwrap();
+    VnmContainer::create(&path, b"pass", 4*MB, CipherAlgorithm::DeoxysII256, "interactive", None, None).unwrap();
     let c = VnmContainer::open(&path, OpenCredential::Password(b"pass")).unwrap();
-    assert_eq!(c.cipher, CipherAlgorithm::Aes256Gcm);
+    assert_eq!(c.cipher, CipherAlgorithm::DeoxysII256);
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn create_and_reopen_serpent256() {
+    let path = tmp("serpent256");
+    let _ = std::fs::remove_file(&path);
+    VnmContainer::create(&path, b"pass", 4*MB, CipherAlgorithm::Serpent256, "interactive", None, None).unwrap();
+    let c = VnmContainer::open(&path, OpenCredential::Password(b"pass")).unwrap();
+    assert_eq!(c.cipher, CipherAlgorithm::Serpent256);
     std::fs::remove_file(&path).ok();
 }
 
@@ -177,7 +187,7 @@ fn root_block_is_empty_directory() {
 fn write_and_read_file_node() {
     let path = tmp("file_node");
     let _ = std::fs::remove_file(&path);
-    let c = VnmContainer::create(&path, b"pass", 4*MB, CipherAlgorithm::Aes256Gcm,
+    let c = VnmContainer::create(&path, b"pass", 4*MB, CipherAlgorithm::DeoxysII256,
         "interactive", None, None).unwrap();
     let content = b"Hello, Venom!".to_vec();
     let file = VaultNode::File(FileBlock {
