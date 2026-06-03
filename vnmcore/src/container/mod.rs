@@ -21,7 +21,7 @@ pub enum CipherAlgorithm {
     DeoxysII256       = 1,
     /// Serpent-256-EAX (CTR + OMAC, 16-byte nonce + 16-byte tag)
     Serpent256        = 2,
-    /// XChaCha20-Poly1305 → Deoxys-II-256 → Serpent-256-CTR + HMAC-SHA256
+    /// XChaCha20-Poly1305 → Deoxys-II-256 → Serpent-256-EAX (three cascaded EAX layers)
     Triple            = 3,
 }
 
