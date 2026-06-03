@@ -125,7 +125,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     // When a local key is selected, clear the external path field to avoid ambiguity
     connect(ui->listMountKeys, &QListWidget::currentRowChanged, this, [this](int row){
-        if (row >= 0 && row < m_keys.size() && !m_keys.at(row).isPubOnly)
+        if (row >= 0 && ui->listMountKeys->item(row))
             ui->leKeyPath->clear();
     });
 
@@ -201,8 +201,13 @@ void MainWindow::refreshMountKeyList()
 {
     m_keys = m_core->localKeys();
     ui->listMountKeys->clear();
-    for (const auto& k : m_keys)
-        ui->listMountKeys->addItem(keyDisplayText(k));
+    const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
+    for (const auto& k : m_keys) {
+        if (k.isPubOnly) continue;  // public-only keys can't decrypt — skip
+        auto* item = new QListWidgetItem(keyDisplayText(k));
+        item->setData(Qt::UserRole, home + QStringLiteral("/.config/venom/keys/") + k.filename);
+        ui->listMountKeys->addItem(item);
+    }
 }
 
 // ── Drag & drop on key list ───────────────────────────────────────────────────
@@ -322,15 +327,13 @@ void MainWindow::onMount()
     if (ui->rbMountPassword->isChecked()) {
         m_core->mountWithPassword(vault, mp, ui->leMountPassword->text());
     } else {
-        // Priority: selected key from the local store, then manually entered path
+        // Priority: selected key from the local store (path in UserRole), then external path
         QString kp;
         const int row = ui->listMountKeys->currentRow();
-        if (row >= 0 && row < m_keys.size() && !m_keys.at(row).isPubOnly) {
-            const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
-            kp = home + QStringLiteral("/.config/venom/keys/") + m_keys.at(row).filename;
-        } else {
+        if (row >= 0 && ui->listMountKeys->item(row))
+            kp = ui->listMountKeys->item(row)->data(Qt::UserRole).toString();
+        if (kp.isEmpty())
             kp = ui->leKeyPath->text().trimmed();
-        }
         if (kp.isEmpty()) {
             QMessageBox::warning(this, {}, tr("Select a key from the list or browse for a .key file."));
             return;
