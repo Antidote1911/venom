@@ -14,8 +14,8 @@ Offset          Taille          Description
 ────────────────────────────────────────────────────────────────────────────────
 0               512             En-tête extérieur — primaire
 512             512             En-tête caché — backup¹  (ou aléatoire si pas de volume caché)
-1 024           14 152          Zone destinataires (password slots + key slots)
-15 176          N × 32 768      Zone de données
+1 024           14 344          Zone destinataires (password slots + key slots)
+15 368          N × 32 768      Zone de données
 EOF − 1 024     512             En-tête extérieur — backup¹  (ou aléatoire si pas de volume caché)
 EOF − 512       512             En-tête caché — primaire¹  (ou aléatoire si pas de volume caché)
 ────────────────────────────────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ Offset  Taille  Type        Description
 ──────────────────────────────────────────────────────────────────────────
 ```
 
-### 2.2 Bloc VNMB chiffré (octets 68–499, 432 octets)
+### 2.2 Bloc VNMB chiffré (octets 68–496/500, taille variable selon le cipher)
 
 Le bloc VNMB (voir §4) contient 396 octets de corps en clair chiffrés avec
 `K_master` (volume extérieur) ou `Argon2id(password, salt)` (volume caché).
@@ -184,10 +184,13 @@ Offset  Taille  Type        Description
 Dérivation de la clé de slot :
 ```
 slot_key = Argon2id(password, salt=slot[0..32], profile=slot[32])
-K_master = AEAD_decrypt(slot_key, slot[33..101], aad=b"vnm:pw:v1")
+Pour chaque cipher {XChaCha20-Poly1305, AES-256-GCM} :
+  enc_len = vnmb_header_len(cipher) + 32 + 16   # 80 ou 72 octets
+  K_master = AEAD_decrypt(slot_key, slot[33..33+enc_len], aad=b"vnm:pw:v1")
+  Si succès → cipher découvert
 ```
 
-### 3.2 Hybrid key slot (1 668 octets)
+### 3.2 Hybrid key slot (1 680 octets)
 
 Chaque slot chiffre `K_master` avec une clé hybride X25519 + ML-KEM-1024.
 
@@ -202,7 +205,7 @@ Offset  Taille  Type        Description
 0       32      [u8; 32]    x25519_eph_pk — clé publique éphémère X25519
 32    1 568      [u8; 1568]  mlkem_ct — chiffré ML-KEM-1024
 1 600   80      VNMB block  K_master chiffré (32 octets → 80 avec XChaCha20)
-                            (68 octets pour AES-256-GCM, reste zéros)
+                            (72 octets pour AES-256-GCM, reste zéros)
 ──────────────────────────────────────────────────────────────────────────
 ```
 
@@ -217,8 +220,10 @@ hybrid_key    = SHA-256(
     ‖ x25519_eph_pk    (32 B)
     ‖ mlkem_ct         (1568 B)
 )
-K_master = AEAD_decrypt(hybrid_key, slot[1600..1680], aad=b"vnm:key:v1")
-           (slice [1600..1668] for AES-256-GCM)
+Pour chaque cipher {XChaCha20-Poly1305, AES-256-GCM} :
+  enc_len = vnmb_header_len(cipher) + 32 + 16   # 80 ou 72 octets
+  K_master = AEAD_decrypt(hybrid_key, slot[1600..1600+enc_len], aad=b"vnm:key:v1")
+  Si succès → cipher découvert
 ```
 
 ---
@@ -431,7 +436,7 @@ Offset   Taille  Type        Description
 Total  1 785 octets
 ```
 
-### 6.2 Fichier `.key` protégé par phrase secrète (1 886 octets)
+### 6.2 Fichier `.key` protégé par phrase secrète (1 898 octets)
 
 ```
 Offset   Taille  Type        Description
@@ -440,11 +445,12 @@ Offset   Taille  Type        Description
 1 688      1     u8          protected = 1
 1 689     64     [u8; 64]    argon2_salt (aléatoire)
 1 753      1     u8          kdf_profile (0=interactive, 1=sensitive)
-1 754    132     VNMB block  AEAD(derived_key, ChaCha20-Poly1305,
+1 754    144     VNMB block  AEAD(derived_key, XChaCha20-Poly1305,
                                aad=b"vnm:key:protect:v1",
                                plaintext = x25519_sk(32) ‖ mlkem_seed(64))
+                             32 (VNMB header) + 96 (plaintext) + 16 (tag) = 144
 ──────────────────────────────────────────────────────────────────────────
-Total  1 886 octets
+Total  1 898 octets
 ```
 
 Dérivation de la clé de protection :

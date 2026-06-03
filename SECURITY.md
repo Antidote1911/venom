@@ -34,13 +34,30 @@ to `master`. There are no backport branches.
 
 | Property | Value |
 |----------|-------|
-| Ciphers | AES-256-GCM, ChaCha20-Poly1305 (AEAD) |
+| Default cipher | XChaCha20-Poly1305 — 192-bit random nonce (birthday bound 2⁹⁶) |
+| Alt cipher | AES-256-GCM — 128-bit random nonce (birthday bound 2⁶⁴, non-standard IV via GHASH) |
 | Integrity | 128-bit AEAD tag per slot |
-| Nonce | Random 96-bit per write (no deterministic IV) |
 | AAD | `slot_index as u64 LE` — binds ciphertext to physical location |
+| Cipher anonymity | Byte 64 of the header is always `0`; the real cipher is discovered blindly via AEAD during open. An observer without the password cannot determine which cipher a container uses. |
 
 Every slot is independently authenticated. Bit-flip attacks and slot-swap
 attacks are detected before decryption completes.
+
+### Key Memory Protection
+
+The master key (`K_master`) is generated and decrypted directly into
+`mlock(2)`-pinned heap pages, preventing the OS from writing it to the
+swap file. The memory is also zeroed via `Zeroize` on drop.
+
+### Anti-Rollback
+
+Each container carries a monotonically increasing generation counter in its
+allocation block. On every `flush()`, the counter is incremented and the new
+value is persisted to `~/.config/venom/rollback.json`. On the next open,
+if the container's generation is lower than the stored baseline,
+`VnmError::RollbackDetected` is returned — the container may have been
+replaced with an older copy (backup replay, cloud sync regression).
+`VnmContainer::reset_rollback_state()` resets the baseline for deliberate restores.
 
 ### Key Derivation
 
@@ -83,7 +100,7 @@ returned to the free list. Deleted files leave no recoverable ciphertext.
 
 | Limitation | Impact |
 |------------|--------|
-| ~~No header backup~~ | Implemented: outer backup at [512..1024], hidden backup at EOF-1024. |
+| ~~No header backup~~ | Implemented: outer backup at EOF-512/EOF-1024 (geographic separation), hidden backup at [512..1024]. |
 | Hidden volume: single password only | The hidden volume does not support ML-KEM key recipients or multiple passwords. |
 | No `fsck` tool | Orphaned slots (from a crash during write-through) are not reclaimed automatically. |
 | Custom filesystem format | A forensic examiner with the key can identify the Venom VaultNode format. Standard filesystems (FAT, ext4) inside the container would offer stronger format deniability. |
@@ -93,14 +110,16 @@ returned to the free list. Deleted files leave no recoverable ciphertext.
 
 ## Cryptographic Dependencies
 
-| Crate | Algorithm | Version policy |
-|-------|-----------|---------------|
-| `aes-gcm` | AES-256-GCM | RustCrypto, kept up to date |
-| `chacha20poly1305` | ChaCha20-Poly1305 | RustCrypto, kept up to date |
+| Crate | Algorithm | Notes |
+|-------|-----------|-------|
+| `aes-gcm` | AES-256-GCM with 16-byte nonce | RustCrypto, kept up to date |
+| `chacha20poly1305` | XChaCha20-Poly1305 (192-bit nonce) | RustCrypto, kept up to date |
 | `ml-kem` | ML-KEM-1024 (FIPS 203) | RustCrypto, kept up to date |
 | `x25519-dalek` | X25519 ECDH | kept up to date |
 | `argon2` | Argon2id (RFC 9106) | RustCrypto, kept up to date |
 | `sha2` | SHA-256 | RustCrypto, kept up to date |
+| `zeroize` | Memory zeroing on drop | RustCrypto, kept up to date |
+| `libc` | `mlock(2)` / `munlock(2)` | Unix only, for K_master swap protection |
 
 Dependencies are reviewed on each update. `cargo audit` is recommended
 before any release build.

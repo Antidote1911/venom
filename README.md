@@ -10,13 +10,16 @@ indistinguishable from encrypted data, enabling plausible deniability.
 
 ## Features
 
-- **AEAD encryption** — AES-256-GCM or ChaCha20-Poly1305, one 128-bit auth tag per 30 KB slot
+- **AEAD encryption** — XChaCha20-Poly1305 (192-bit nonce, default) or AES-256-GCM (128-bit nonce); one 128-bit auth tag per 30 KB slot
+- **Cipher anonymity** — cipher choice is never exposed in plaintext; discovered blindly via AEAD on open
 - **Memory-hard KDF** — Argon2id (interactive: 64 MiB / sensitive: 256 MiB)
 - **Post-quantum recipients** — X25519 + ML-KEM-1024 hybrid KEM (NIST FIPS 203)
 - **Multi-recipient** — up to 8 password slots and 8 hybrid key slots per container
 - **Recipient anonymity** — no plaintext fingerprint in key slots; all slots tried blindly
 - **Hidden volumes** — a second encrypted volume lives at EOF, indistinguishable from random bytes
+- **Anti-rollback** — monotonic generation counter detects container replacement with an older copy
 - **Forward secrecy** — freed slots are immediately overwritten with random bytes
+- **K_master in locked memory** — master key generated and decrypted directly into `mlock`'d heap pages, never written to swap
 - **FUSE mount** — containers mount as a regular directory on Linux
 - **Qt6 GUI** — create, mount, unmount, manage recipients
 
@@ -26,18 +29,23 @@ indistinguishable from encrypted data, enabling plausible deniability.
 
 | Property | VeraCrypt | Venom |
 |----------|:---------:|:-----:|
+| Property | VeraCrypt | Venom |
+|----------|:---------:|:-----:|
 | **Encryption mode** | XTS-AES (no integrity) | AEAD per slot (XChaCha20-Poly1305 / AES-256-GCM) |
 | **Per-block authentication** | ✗ silent corruption possible | ✓ 128-bit tag, decryption fails on tampering |
 | **Slot-swap / relocation attack** | ✗ | ✓ slot index as AAD |
 | **Nonce** | Deterministic (sector number) | 192-bit random (XChaCha20) / 128-bit random (AES) |
+| **Cipher anonymity** | N/A | ✓ cipher_id always 0; real cipher discovered blindly |
 | **KDF** | PBKDF2-SHA512 | Argon2id (memory-hard, RFC 9106) |
 | **GPU/ASIC resistance** | ✗ CPU-bound only | ✓ 64–256 MiB RAM required per guess |
 | **Post-quantum recipients** | ✗ | ✓ X25519 + ML-KEM-1024 (NIST FIPS 203) |
 | **Multi-recipient** | ✗ single password/keyfile | ✓ up to 8 passwords + 8 hybrid keys |
 | **Recipient anonymity** | N/A | ✓ no plaintext fingerprint in container |
 | **Hidden volumes** | ✓ | ✓ |
+| **Anti-rollback** | ✗ | ✓ monotonic generation counter + local state file |
 | **Forward secrecy (deleted files)** | ✗ ciphertext remains on disk | ✓ slot wiped with random bytes on free |
-| **Header backup** | ✓ redundant copy | ✓ outer at [512..1024], hidden at EOF-1024 |
+| **Key material in locked memory** | ✗ | ✓ K_master in `mlock`'d heap, never swapped |
+| **Header backup** | ✓ redundant copy | ✓ outer at EOF, hidden at [512..1024] (geographic separation) |
 | **Cipher cascades** | ✓ AES-Twofish-Serpent… | ✗ one cipher per container |
 | **Inner filesystem** | FAT / exFAT / ext4 / NTFS | Custom VaultNode (msgpack) |
 | **Single-file container** | ✓ | ✓ |
@@ -102,7 +110,7 @@ VnmContainer::create(
     "vault.vnm",
     b"my-password",
     512 * 1024 * 1024,          // 512 MB
-    CipherAlgorithm::ChaCha20Poly1305,
+    CipherAlgorithm::XChaCha20Poly1305,
     "interactive",
     Some("My vault".into()),
     None,                        // no hidden volume
@@ -141,8 +149,10 @@ vnmcore/
       container.rs  VnmContainer API (create, open, recipients)
       fuse.rs       FUSE driver with chunk-level LRU cache
     storage/
-      slot_store.rs encrypted slot I/O + allocation bitmap
+      slot_store.rs encrypted slot I/O + allocation bitmap + generation counter
       vault_fs.rs   VaultNode types (Directory, File, FileData, FileIndex)
+    locked_memory.rs  mlock wrapper for key material
+    rollback.rs       anti-rollback generation state (~/.config/venom/rollback.json)
 ```
 
 ### File storage model
