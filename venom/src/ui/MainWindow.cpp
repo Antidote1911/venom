@@ -308,12 +308,7 @@ void MainWindow::onGenerateKey()
     const QString label = ui->leGenLabel->text().trimmed();
     if (label.isEmpty()) { QMessageBox::warning(this, {}, tr("Enter a label for the keypair.")); return; }
 
-    const QString path = QFileDialog::getSaveFileName(
-        this, tr("Save keypair"), {}, tr("Venom key (*.key)"));
-    if (path.isEmpty()) return;
-
-    const QString fullPath = path.endsWith(QLatin1String(".key")) ? path : path + QLatin1String(".key");
-    m_core->generateKey(fullPath, label, ui->leGenPassphrase->text(), ui->chkSensitive->isChecked());
+    m_core->generateKey(label, ui->leGenPassphrase->text(), ui->chkSensitive->isChecked());
     ui->leGenLabel->clear();
     ui->leGenPassphrase->clear();
 }

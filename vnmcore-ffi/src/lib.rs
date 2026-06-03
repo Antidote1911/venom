@@ -276,6 +276,54 @@ pub extern "C" fn vnm_key_generate(
     }
 }
 
+/// Generate a new hybrid keypair and save it automatically to
+/// `~/$XDG_CONFIG_HOME/venom/keys/<fingerprint_hex>.key`.
+/// Returns the saved path as a heap-allocated C string (free with `vnm_free_string`),
+/// or NULL on error (error set in `error_out`).
+#[no_mangle]
+pub extern "C" fn vnm_key_generate_auto(
+    label:         *const c_char,
+    passphrase:    *const c_char,
+    kdf_sensitive: bool,
+    error_out:     *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    let lbl     = cstr_or(label, "");
+    let pw      = cstr_or(passphrase, "");
+    let profile = if kdf_sensitive { 1u8 } else { 0u8 };
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let keys_dir = std::path::PathBuf::from(home)
+        .join(".config").join("venom").join("keys");
+    if let Err(e) = std::fs::create_dir_all(&keys_dir) {
+        set_error(&e.to_string(), error_out);
+        return std::ptr::null_mut();
+    }
+
+    let key = vnmcore::hybrid_generate();
+    let fp_hex: String = key.public.fingerprint().iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let path = keys_dir.join(format!("{fp_hex}.key"));
+
+    let result = if pw.is_empty() {
+        vnmcore::write_key_file(&path, &key, lbl)
+    } else {
+        vnmcore::write_key_file_protected(&path, &key, lbl, pw.as_bytes(), profile)
+    };
+
+    match result {
+        Ok(_) => {
+            let s = path.to_string_lossy().into_owned();
+            match std::ffi::CString::new(s) {
+                Ok(cs) => cs.into_raw(),
+                Err(e) => { set_error(&e.to_string(), error_out); std::ptr::null_mut() }
+            }
+        }
+        Err(e) => { set_error(&e.to_string(), error_out); std::ptr::null_mut() }
+    }
+}
+
 /// Export the public portion of a .key as a .pub file.
 #[no_mangle]
 pub extern "C" fn vnm_key_export_pub(

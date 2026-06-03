@@ -75,10 +75,10 @@ public:
 
     // ── Key management ────────────────────────────────────────────────────────
 
-    void generateKey(const QString& savePath,
-                     const QString& label,
+    /** Generate keypair and save automatically to ~/.config/venom/keys/. */
+    void generateKey(const QString& label,
                      const QString& passphrase,
-                     bool           sensitivProfile);
+                     bool           sensitiveProfile);
 
     void exportPublicKey(const QString& keyPath,
                          const QString& destPath,

@@ -126,25 +126,25 @@ void VenomCore::unmount(const QString& mountpoint) {
 
 // ── Key management ────────────────────────────────────────────────────────────
 
-void VenomCore::generateKey(const QString& savePath,
-                            const QString& label,
+void VenomCore::generateKey(const QString& label,
                             const QString& passphrase,
                             bool           sensitive)
 {
     char* err = nullptr;
-    bool ok = vnm_key_generate(
-        savePath.toUtf8().constData(),
+    char* path = vnm_key_generate_auto(
         label.toUtf8().constData(),
         passphrase.toUtf8().constData(),
         sensitive, &err
     );
-    if (!ok) {
+    if (!path) {
         QString msg = err ? QString::fromUtf8(err) : "Key generation failed";
         vnm_free_string(err);
         emit errorOccurred(msg);
         return;
     }
-    emit keyGenerated(savePath);
+    const QString savedPath = QString::fromUtf8(path);
+    vnm_free_string(path);
+    emit keyGenerated(savedPath);
 }
 
 void VenomCore::exportPublicKey(const QString& keyPath,

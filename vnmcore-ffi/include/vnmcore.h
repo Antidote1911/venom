@@ -160,6 +160,20 @@ bool vnm_key_generate(
     char**      error_out
 );
 
+/**
+ * Generate a new hybrid keypair and save it automatically to
+ * ~/.config/venom/keys/<fingerprint_hex>.key (directory created if absent).
+ * @param passphrase    Empty string for no passphrase protection
+ * @param kdf_sensitive true = Sensitive profile (256 MiB), false = Interactive (64 MiB)
+ * @return Heap-allocated path string (free with vnm_free_string), or NULL on error
+ */
+char* vnm_key_generate_auto(
+    const char* label,
+    const char* passphrase,
+    bool        kdf_sensitive,
+    char**      error_out
+);
+
 /** Export the public portion of a .key file as a .pub file for sharing. */
 bool vnm_key_export_pub(
     const char* key_path,
