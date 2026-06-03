@@ -16,6 +16,7 @@
 #include <QMimeData>
 #include <QDir>
 #include <QStandardPaths>
+#include <QStorageInfo>
 
 namespace Venom {
 
@@ -28,6 +29,38 @@ static QString formatFileSize(qint64 bytes)
     if (bytes >= 1024 * 1024)
         return QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024), 0, 'f', 1);
     return QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 0);
+}
+
+/// Returns a list of (keyFilePath, driveDisplayName) found on removable/external volumes.
+/// Scans <root>/venom/ then <root>/ for *.key files.
+static QList<QPair<QString,QString>> scanUsbKeyFiles()
+{
+    const QStringList skipPrefixes = {
+        QStringLiteral("/sys"), QStringLiteral("/proc"), QStringLiteral("/dev"),
+        QStringLiteral("/run/user"), QStringLiteral("/boot"), QStringLiteral("/snap"),
+        QStringLiteral("/tmp"),  QStringLiteral("/var"),
+    };
+
+    QList<QPair<QString,QString>> result;
+    for (const QStorageInfo& vol : QStorageInfo::mountedVolumes()) {
+        if (!vol.isValid() || !vol.isReady()) continue;
+        const QString root = vol.rootPath();
+        if (root == QLatin1String("/")) continue;
+        bool skip = false;
+        for (const QString& p : skipPrefixes) { if (root.startsWith(p)) { skip = true; break; } }
+        if (skip) continue;
+
+        const QString name = vol.displayName().isEmpty()
+            ? QFileInfo(root).fileName()
+            : vol.displayName();
+
+        // Prefer venom/ subfolder, fall back to root
+        const QDir venomDir(root + QStringLiteral("/venom"));
+        const QDir scanDir = venomDir.exists() ? venomDir : QDir(root);
+        for (const QFileInfo& fi : scanDir.entryInfoList({QStringLiteral("*.key")}, QDir::Files))
+            result << qMakePair(fi.absoluteFilePath(), name);
+    }
+    return result;
 }
 
 // ── MainWindow ────────────────────────────────────────────────────────────────
@@ -94,6 +127,9 @@ MainWindow::MainWindow(QWidget* parent)
         ui->stackMount->setCurrentIndex(on ? 0 : 1);
     });
 
+    // USB refresh button in mount key section
+    connect(ui->btnRefreshUsb, &QPushButton::clicked, this, &MainWindow::refreshMountKeyList);
+
     // ── Tab 3 — Key manager ───────────────────────────────────────────────────
     connect(ui->btnGenerate,  &QPushButton::clicked, this, &MainWindow::onGenerateKey);
     connect(ui->btnImportKey, &QPushButton::clicked, this, &MainWindow::onImportKey);
@@ -108,7 +144,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int idx){
         if (idx == 0) { refreshUnifiedVaultList(); refreshMountKeyList(); }
         if (idx == 1) refreshCreateKeyList();
-        if (idx == 2) refreshKeyList();
+        if (idx == 2) { refreshKeyList(); refreshKeyDestCombo(); }
     });
 
     // When a local key is selected, clear the external path field to avoid ambiguity
@@ -126,6 +162,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_core, &VenomCore::errorOccurred,    this, &MainWindow::onError);
 
     refreshUnifiedVaultList();
+    refreshKeyDestCombo();
 }
 
 MainWindow::~MainWindow() { delete ui; }
@@ -135,7 +172,7 @@ MainWindow::~MainWindow() { delete ui; }
 void MainWindow::refreshUnifiedVaultList()
 {
     // Delete only the dynamically created cards — never touch permanent UI widgets
-    for (QWidget* card : qAsConst(m_vaultCards)) {
+    for (QWidget* card : std::as_const(m_vaultCards)) {
         m_vaultLayout->removeWidget(card);
         delete card;
     }
@@ -268,16 +305,83 @@ void MainWindow::refreshCreateKeyList()
         ui->listCreateKeys->addItem(keyDisplayText(k));
 }
 
+static QListWidgetItem* makeSeparatorItem(const QString& text)
+{
+    auto* sep = new QListWidgetItem(text);
+    sep->setFlags(Qt::NoItemFlags);
+    QFont f = sep->font();
+    f.setBold(true);
+    sep->setFont(f);
+    sep->setForeground(Qt::gray);
+    return sep;
+}
+
 void MainWindow::refreshMountKeyList()
 {
     m_keys = m_core->localKeys();
     ui->listMountKeys->clear();
     const QString home = QString::fromLocal8Bit(qgetenv("HOME"));
+
+    // ── Local private keys ────────────────────────────────────────────────────
+    bool hasLocal = false;
     for (const auto& k : m_keys) {
-        if (k.isPubOnly) continue;  // public-only keys can't decrypt — skip
+        if (k.isPubOnly) continue;
+        if (!hasLocal) {
+            ui->listMountKeys->addItem(makeSeparatorItem(QStringLiteral("── Local keys ──")));
+            hasLocal = true;
+        }
         auto* item = new QListWidgetItem(keyDisplayText(k));
         item->setData(Qt::UserRole, home + QStringLiteral("/.config/venom/keys/") + k.filename);
         ui->listMountKeys->addItem(item);
+    }
+
+    // ── USB keys ──────────────────────────────────────────────────────────────
+    const auto usbKeys = scanUsbKeyFiles();
+    bool hasUsb = false;
+    for (const auto& [path, drive] : usbKeys) {
+        if (!hasUsb) {
+            ui->listMountKeys->addItem(
+                makeSeparatorItem(QStringLiteral("── USB: ") + drive + QStringLiteral(" ──")));
+            hasUsb = true;
+        }
+        QString label = QFileInfo(path).fileName();
+        // Try to read the key label from file metadata
+        if (auto* kInfo = new QListWidgetItem(label + QStringLiteral("  [USB]"))) {
+            kInfo->setData(Qt::UserRole, path);
+            kInfo->setForeground(QColor(QStringLiteral("#2980b9")));
+            ui->listMountKeys->addItem(kInfo);
+        }
+    }
+
+    // Show hint when no USB keys detected
+    ui->lblInsertUsb->setVisible(!hasUsb);
+}
+
+void MainWindow::refreshKeyDestCombo()
+{
+    ui->cbKeyDest->clear();
+    ui->cbKeyDest->addItem(
+        QStringLiteral("Local store (~/.config/venom/keys/)"),
+        QStringLiteral("local"));
+
+    for (const QStorageInfo& vol : QStorageInfo::mountedVolumes()) {
+        if (!vol.isValid() || !vol.isReady()) continue;
+        const QString root = vol.rootPath();
+        if (root == QLatin1String("/")) continue;
+        const QStringList skip = {
+            QStringLiteral("/sys"), QStringLiteral("/proc"), QStringLiteral("/dev"),
+            QStringLiteral("/run/user"), QStringLiteral("/boot"), QStringLiteral("/snap"),
+            QStringLiteral("/tmp"), QStringLiteral("/var"),
+        };
+        bool shouldSkip = false;
+        for (const QString& p : skip) { if (root.startsWith(p)) { shouldSkip = true; break; } }
+        if (shouldSkip) continue;
+        const QString name = vol.displayName().isEmpty()
+            ? QFileInfo(root).fileName() : vol.displayName();
+        const QString usbVenomDir = root + QStringLiteral("/venom");
+        ui->cbKeyDest->addItem(
+            QStringLiteral("USB: ") + name + QStringLiteral(" (") + root + QStringLiteral("/venom/)"),
+            usbVenomDir);
     }
 }
 
@@ -426,7 +530,13 @@ void MainWindow::onGenerateKey()
     const QString label = ui->leGenLabel->text().trimmed();
     if (label.isEmpty()) { QMessageBox::warning(this, {}, tr("Enter a label for the keypair.")); return; }
 
-    m_core->generateKey(label, ui->leGenPassphrase->text(), ui->chkSensitive->isChecked());
+    const QString dest = ui->cbKeyDest->currentData().toString();
+    if (dest == QStringLiteral("local") || dest.isEmpty()) {
+        m_core->generateKey(label, ui->leGenPassphrase->text(), ui->chkSensitive->isChecked());
+    } else {
+        // Save directly to USB drive's venom/ directory — never touches local store
+        m_core->generateKeyToDir(dest, label, ui->leGenPassphrase->text(), ui->chkSensitive->isChecked());
+    }
     ui->leGenLabel->clear();
     ui->leGenPassphrase->clear();
 }
@@ -547,6 +657,7 @@ void MainWindow::onKeyGenerated(const QString& path)
 {
     statusBar()->showMessage(QStringLiteral("Keypair saved: ") + path, 5000);
     refreshKeyList();
+    refreshMountKeyList(); // USB keys may have changed
 }
 
 void MainWindow::onError(const QString& msg)

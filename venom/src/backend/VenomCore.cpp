@@ -149,6 +149,29 @@ void VenomCore::generateKey(const QString& label,
     emit keyGenerated(savedPath);
 }
 
+void VenomCore::generateKeyToDir(const QString& dir,
+                                  const QString& label,
+                                  const QString& passphrase,
+                                  bool           sensitive)
+{
+    char* err = nullptr;
+    char* path = vnm_key_generate_to_dir(
+        dir.toUtf8().constData(),
+        label.toUtf8().constData(),
+        passphrase.toUtf8().constData(),
+        sensitive, &err
+    );
+    if (!path) {
+        QString msg = err ? QString::fromUtf8(err) : "Key generation failed";
+        vnm_free_string(err);
+        emit errorOccurred(msg);
+        return;
+    }
+    const QString savedPath = QString::fromUtf8(path);
+    vnm_free_string(path);
+    emit keyGenerated(savedPath);
+}
+
 void VenomCore::exportPublicKey(const QString& keyPath,
                                 const QString& destPath,
                                 const QString& keyPassphrase)

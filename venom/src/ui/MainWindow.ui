@@ -260,12 +260,46 @@
                <item>
                 <widget class="QListWidget" name="listMountKeys">
                  <property name="toolTip">
-                  <string>Select a local key, or browse for an external .key file below</string>
+                  <string>Local keys and USB keys — select one then click Mount</string>
                  </property>
                  <property name="alternatingRowColors">
                   <bool>true</bool>
                  </property>
                 </widget>
+               </item>
+               <item>
+                <layout class="QHBoxLayout">
+                 <item>
+                  <widget class="QLabel" name="lblInsertUsb">
+                   <property name="visible">
+                    <bool>false</bool>
+                   </property>
+                   <property name="text">
+                    <string>Insert your Venom USB key and click Refresh</string>
+                   </property>
+                   <property name="styleSheet">
+                    <string>color: #e67e22; font-style: italic;</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <spacer>
+                   <property name="orientation">
+                    <enum>Qt::Orientation::Horizontal</enum>
+                   </property>
+                   <property name="sizeHint" stdset="0">
+                    <size><width>40</width><height>20</height></size>
+                   </property>
+                  </spacer>
+                 </item>
+                 <item>
+                  <widget class="QPushButton" name="btnRefreshUsb">
+                   <property name="text">
+                    <string>Refresh USB</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
                </item>
                <item>
                 <layout class="QHBoxLayout">
@@ -721,13 +755,27 @@ Security holds even if one algorithm is broken.</string>
                </widget>
               </item>
               <item row="2" column="0">
+               <widget class="QLabel" name="lblGenDest">
+                <property name="text">
+                 <string>Save to:</string>
+                </property>
+               </widget>
+              </item>
+              <item row="2" column="1">
+               <widget class="QComboBox" name="cbKeyDest">
+                <property name="toolTip">
+                 <string>Local key store or a detected USB drive</string>
+                </property>
+               </widget>
+              </item>
+              <item row="3" column="0">
                <widget class="QLabel" name="lblGenKdf">
                 <property name="text">
                  <string>KDF:</string>
                 </property>
                </widget>
               </item>
-              <item row="2" column="1">
+              <item row="3" column="1">
                <widget class="QCheckBox" name="chkSensitive">
                 <property name="text">
                  <string>Sensitive profile  (256 MiB / 4 passes)</string>

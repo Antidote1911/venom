@@ -80,6 +80,12 @@ public:
                      const QString& passphrase,
                      bool           sensitiveProfile);
 
+    /** Generate keypair and save to an explicit directory (e.g. USB drive). */
+    void generateKeyToDir(const QString& dir,
+                          const QString& label,
+                          const QString& passphrase,
+                          bool           sensitiveProfile);
+
     void exportPublicKey(const QString& keyPath,
                          const QString& destPath,
                          const QString& keyPassphrase);

@@ -161,6 +161,19 @@ bool vnm_key_generate(
 );
 
 /**
+ * Generate a keypair into an explicit directory (e.g. a USB drive).
+ * Saves to <dir>/<fingerprint_hex>.key. Creates the directory if absent.
+ * @return Heap-allocated path string (free with vnm_free_string), or NULL on error
+ */
+char* vnm_key_generate_to_dir(
+    const char* dir,
+    const char* label,
+    const char* passphrase,
+    bool        kdf_sensitive,
+    char**      error_out
+);
+
+/**
  * Generate a new hybrid keypair and save it automatically to
  * ~/.config/venom/keys/<fingerprint_hex>.key (directory created if absent).
  * @param passphrase    Empty string for no passphrase protection

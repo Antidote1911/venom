@@ -286,6 +286,45 @@ pub extern "C" fn vnm_key_generate(
     }
 }
 
+/// Generate a keypair into an explicit directory (e.g. a USB drive).
+/// Saves to `<dir>/<fingerprint_hex>.key`. Creates the directory if absent.
+/// Returns the saved path (free with `vnm_free_string`), or NULL on error.
+#[no_mangle]
+pub extern "C" fn vnm_key_generate_to_dir(
+    dir:           *const c_char,
+    label:         *const c_char,
+    passphrase:    *const c_char,
+    kdf_sensitive: bool,
+    error_out:     *mut *mut c_char,
+) -> *mut c_char {
+    clear_error(error_out);
+    let Some(dir_s) = cstr(dir) else { set_error("null dir", error_out); return std::ptr::null_mut(); };
+    let lbl     = cstr_or(label, "");
+    let pw      = cstr_or(passphrase, "");
+    let profile = if kdf_sensitive { 1u8 } else { 0u8 };
+
+    let keys_dir = std::path::Path::new(dir_s);
+    if let Err(e) = std::fs::create_dir_all(keys_dir) {
+        set_error(&e.to_string(), error_out);
+        return std::ptr::null_mut();
+    }
+    let key = vnmcore::hybrid_generate();
+    let fp_hex: String = key.public.fingerprint().iter().map(|b| format!("{b:02x}")).collect();
+    let path = keys_dir.join(format!("{fp_hex}.key"));
+    let result = if pw.is_empty() {
+        vnmcore::write_key_file(&path, &key, lbl)
+    } else {
+        vnmcore::write_key_file_protected(&path, &key, lbl, pw.as_bytes(), profile)
+    };
+    match result {
+        Ok(_) => match std::ffi::CString::new(path.to_string_lossy().into_owned()) {
+            Ok(cs) => cs.into_raw(),
+            Err(e) => { set_error(&e.to_string(), error_out); std::ptr::null_mut() }
+        },
+        Err(e) => { set_error(&e.to_string(), error_out); std::ptr::null_mut() }
+    }
+}
+
 /// Generate a new hybrid keypair and save it automatically to
 /// `~/$XDG_CONFIG_HOME/venom/keys/<fingerprint_hex>.key`.
 /// Returns the saved path as a heap-allocated C string (free with `vnm_free_string`),

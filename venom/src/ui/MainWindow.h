@@ -51,6 +51,7 @@ private:
     void refreshKeyList();
     void refreshCreateKeyList();
     void refreshMountKeyList();
+    void refreshKeyDestCombo();  ///< populate cbKeyDest with local store + USB drives
 
     Ui::MainWindow*  ui;
     VenomCore*       m_core;
