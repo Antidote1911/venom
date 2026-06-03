@@ -8,7 +8,7 @@ use deoxys::DeoxysII256;
 use eax::Eax;
 use serpent::Serpent;
 use cipher::{BlockCipherEncrypt, BlockCipherEncClosure, KeyInit as SerpentInit, KeySizeUser, BlockSizeUser, ParBlocksSizeUser};
-use hybrid_array::{Array, typenum::U16 as HU16};
+use hybrid_array::typenum::U16 as HU16;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use rand::RngCore;
@@ -29,7 +29,12 @@ use crate::container::CipherAlgorithm;
 // Triple-cipher nonce section (N = 55 = 24+15+16):
 //   [8..32]   nonce1 — 24 B (XChaCha20-Poly1305)
 //   [32..47]  nonce2 — 15 B (DeoxysII256)
-//   [47..63]  nonce3 — 16 B (Serpent-256-CTR, layer 3 of Triple)
+//   [47..63]  nonce3 — 16 B (Serpent-256-EAX)
+//
+// Triple-cipher tag layout (48 B = 16+16+16):
+//   tag1 — 16 B (Poly1305)
+//   tag2 — 16 B (Deoxys AEAD)
+//   tag3 — 16 B (Serpent EAX)
 
 const MAGIC:        &[u8; 4] = b"VNMB";
 const VERSION:      u32       = 1;
@@ -37,7 +42,7 @@ const NONCE_OFFSET: usize     = 8;
 
 const N1: usize = 24; // XChaCha20
 const N2: usize = 15; // DeoxysII256
-const N3: usize = 16; // Serpent-CTR (Triple layer 3) / Serpent-EAX
+const N3: usize = 16; // Serpent-256-EAX
 const TRIPLE_NONCE_LEN: usize = N1 + N2 + N3; // 55
 
 /// Serpent newtype with a fixed 256-bit key, required because `Serpent::KeySize = U16`
@@ -83,7 +88,7 @@ fn nonce_section_len(cipher: CipherAlgorithm) -> usize {
 
 fn tags_len(cipher: CipherAlgorithm) -> usize {
     match cipher {
-        CipherAlgorithm::Triple => 64, // poly1305(16) + deoxys(16) + hmac-sha256(32)
+        CipherAlgorithm::Triple => 48, // eax_poly1305(16) + eax_deoxys(16) + eax_serpent(16)
         _                       => 16, // single AEAD tag
     }
 }
@@ -91,32 +96,6 @@ fn tags_len(cipher: CipherAlgorithm) -> usize {
 /// Byte length of the VNMB header (magic + version + nonce section) for `cipher`.
 pub fn vnmb_header_len(cipher: CipherAlgorithm) -> usize {
     NONCE_OFFSET + nonce_section_len(cipher)
-}
-
-// ── Serpent-CTR helpers (used only by Triple layer 3) ────────────────────────
-
-fn serpent_ctr_apply(key: &[u8; 32], nonce: &[u8; N3], data: &mut [u8]) -> Result<()> {
-    let cipher = <Serpent as SerpentInit>::new_from_slice(key.as_ref())
-        .map_err(|e| VnmError::CipherError(format!("Serpent-256 init: {e}")))?;
-    let mut ctr = u128::from_be_bytes(*nonce);
-    for chunk in data.chunks_mut(16) {
-        let mut block: Array<u8, HU16> = ctr.to_be_bytes().into();
-        cipher.encrypt_block(&mut block);
-        let keystream: [u8; 16] = block.into();
-        for (d, k) in chunk.iter_mut().zip(keystream.iter()) {
-            *d ^= k;
-        }
-        ctr = ctr.wrapping_add(1);
-    }
-    Ok(())
-}
-
-fn hmac_sha256(key: &[u8; 32], nonce: &[u8], aad: &[u8], ct: &[u8]) -> [u8; 32] {
-    let mut mac = <Hmac<Sha256>>::new_from_slice(key).expect("HMAC accepts any key");
-    mac.update(nonce);
-    mac.update(aad);
-    mac.update(ct);
-    mac.finalize().into_bytes().into()
 }
 
 // ── Triple cipher key schedule ────────────────────────────────────────────────
@@ -128,18 +107,16 @@ fn derive_subkey_32(k_master: &[u8; 32], label: &[u8]) -> [u8; 32] {
 }
 
 struct TripleKeys {
-    k1:     [u8; 32],  // XChaCha20-Poly1305
-    k2:     [u8; 32],  // DeoxysII256
-    k3_enc: [u8; 32],  // Serpent-256-CTR
-    k3_mac: [u8; 32],  // HMAC-SHA256
+    k1: [u8; 32],  // XChaCha20-Poly1305
+    k2: [u8; 32],  // DeoxysII256
+    k3: [u8; 32],  // Serpent-256-EAX
 }
 
 fn derive_triple_keys(k_master: &[u8; 32]) -> TripleKeys {
     TripleKeys {
-        k1:     derive_subkey_32(k_master, b"\x01venom:triple:xchacha20"),
-        k2:     derive_subkey_32(k_master, b"\x02venom:triple:deoxys"),
-        k3_enc: derive_subkey_32(k_master, b"\x03venom:triple:serpent:enc"),
-        k3_mac: derive_subkey_32(k_master, b"\x04venom:triple:serpent:mac"),
+        k1: derive_subkey_32(k_master, b"\x01venom:triple:xchacha20"),
+        k2: derive_subkey_32(k_master, b"\x02venom:triple:deoxys"),
+        k3: derive_subkey_32(k_master, b"\x03venom:triple:serpent"),
     }
 }
 
@@ -221,7 +198,7 @@ fn encrypt_triple(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8
         let tag = c.encrypt_in_place_detached(n, aad, &mut layer1)
             .map_err(|e| VnmError::CipherError(e.to_string()))?;
         layer1.extend_from_slice(tag.as_slice());
-    }
+    } // layer1 = P+16
 
     // Layer 2: DeoxysII256
     let mut layer2 = layer1;
@@ -233,21 +210,27 @@ fn encrypt_triple(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8
         let tag = c.encrypt_in_place_detached(n, aad, &mut layer2)
             .map_err(|e| VnmError::CipherError(e.to_string()))?;
         layer2.extend_from_slice(tag.as_slice());
-    }
+    } // layer2 = P+32
 
-    // Layer 3: Serpent-256-CTR + HMAC-SHA256
+    // Layer 3: Serpent-256-EAX
     let mut layer3 = layer2;
-    serpent_ctr_apply(&keys.k3_enc, &nonce3, &mut layer3)?;
-    let mac = hmac_sha256(&keys.k3_mac, &nonce3, aad, &layer3);
+    {
+        use eax::aead::{KeyInit as _, AeadInPlace as _};
+        let c = SerpentEax::new_from_slice(&keys.k3)
+            .map_err(|e| VnmError::CipherError(e.to_string()))?;
+        let n = eax::aead::Nonce::<SerpentEax>::from_slice(&nonce3);
+        let tag = c.encrypt_in_place_detached(n, aad, &mut layer3)
+            .map_err(|e| VnmError::CipherError(e.to_string()))?;
+        layer3.extend_from_slice(tag.as_slice());
+    } // layer3 = P+48
 
-    let mut buf = Vec::with_capacity(NONCE_OFFSET + TRIPLE_NONCE_LEN + layer3.len() + 32);
+    let mut buf = Vec::with_capacity(NONCE_OFFSET + TRIPLE_NONCE_LEN + layer3.len());
     buf.extend_from_slice(MAGIC);
     buf.extend_from_slice(&VERSION.to_le_bytes());
     buf.extend_from_slice(&nonce1);
     buf.extend_from_slice(&nonce2);
     buf.extend_from_slice(&nonce3);
     buf.extend_from_slice(&layer3);
-    buf.extend_from_slice(&mac);
     Ok(buf)
 }
 
@@ -313,7 +296,7 @@ fn decrypt_single(key: &[u8; 32], cipher: CipherAlgorithm, aad: &[u8], data: &[u
 fn decrypt_triple(key: &[u8; 32], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     let hlen = NONCE_OFFSET + TRIPLE_NONCE_LEN; // 63
 
-    if data.len() < hlen + 64 + 1 { return Err(VnmError::AuthenticationFailed); }
+    if data.len() < hlen + 48 + 1 { return Err(VnmError::AuthenticationFailed); }
     if &data[0..4] != MAGIC       { return Err(VnmError::AuthenticationFailed); }
     let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
     if version != VERSION {
@@ -326,17 +309,20 @@ fn decrypt_triple(key: &[u8; 32], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
 
     let keys = derive_triple_keys(key);
 
-    // Layer 3 reverse: verify HMAC, then Serpent-CTR decrypt
-    let mac_expected = &data[data.len() - 32..];
-    let layer3_ct    = &data[hlen..data.len() - 32];
-
-    let mac_actual = hmac_sha256(&keys.k3_mac, nonce3, aad, layer3_ct);
-    use subtle::ConstantTimeEq;
-    if mac_actual.ct_eq(mac_expected).unwrap_u8() == 0 {
-        return Err(VnmError::AuthenticationFailed);
-    }
-    let mut layer2 = layer3_ct.to_vec();
-    serpent_ctr_apply(&keys.k3_enc, nonce3, &mut layer2)?;
+    // Layer 3 reverse: Serpent-256-EAX decrypt
+    let mut layer2 = data[hlen..].to_vec();
+    {
+        use eax::aead::{KeyInit as _, AeadInPlace as _, Tag};
+        let c = SerpentEax::new_from_slice(&keys.k3)
+            .map_err(|e| VnmError::CipherError(e.to_string()))?;
+        let n = eax::aead::Nonce::<SerpentEax>::from_slice(nonce3);
+        let tag_start = layer2.len() - 16;
+        let tag_bytes = layer2[tag_start..].to_vec();
+        layer2.truncate(tag_start);
+        let t = Tag::<SerpentEax>::from_slice(&tag_bytes);
+        c.decrypt_in_place_detached(n, aad, &mut layer2, t)
+         .map_err(|_| VnmError::AuthenticationFailed)?;
+    } // layer2 = P+32
 
     // Layer 2 reverse: DeoxysII256 decrypt
     {
@@ -350,7 +336,7 @@ fn decrypt_triple(key: &[u8; 32], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
         let t = Tag::<DeoxysII256>::from_slice(&tag_bytes);
         c.decrypt_in_place_detached(n, aad, &mut layer2, t)
          .map_err(|_| VnmError::AuthenticationFailed)?;
-    }
+    } // layer2 = P+16
 
     // Layer 1 reverse: XChaCha20-Poly1305 decrypt
     {
@@ -364,7 +350,7 @@ fn decrypt_triple(key: &[u8; 32], aad: &[u8], data: &[u8]) -> Result<Vec<u8>> {
         let t = Tag::from_slice(&tag_bytes);
         c.decrypt_in_place_detached(n, aad, &mut layer2, t)
          .map_err(|_| VnmError::AuthenticationFailed)?;
-    }
+    } // layer2 = plaintext
 
     Ok(layer2)
 }

@@ -9,12 +9,12 @@
 //!   [33..33+E] VNMB encrypted K_master   AAD: b"vnm:pw:v1"
 //!   [33+E..PW_SLOT_SIZE] zero padding
 //!
-//!   E = vnmb_enc_32(Triple) = 8+55+32+64 = 159  →  PW_SLOT_SIZE = 192
+//!   E = vnmb_enc_32(Triple) = 8+55+32+48 = 143  →  PW_SLOT_SIZE = 176
 //!
 //!   Other ciphers for reference:
-//!     XChaCha20: 8+24+32+16 = 80
-//!     DeoxysII:  8+15+32+16 = 71
-//!     Serpent256-EAX: 8+16+32+16 = 72
+//!     XChaCha20:      8+24+32+16 =  80
+//!     DeoxysII:       8+15+32+16 =  71
+//!     Serpent256-EAX: 8+16+32+16 =  72
 //!
 //! ## Hybrid key slot — X25519 + ML-KEM-1024
 //!
@@ -25,7 +25,7 @@
 //!   [1600..1600+E] VNMB encrypted K_master   AAD: b"vnm:key:v1"
 //!   [1600+E..KEY_SLOT_SIZE] zero padding
 //!
-//!   KEY_SLOT_SIZE = 32 + 1568 + 159 = 1759 (using Triple max)
+//!   KEY_SLOT_SIZE = 32 + 1568 + 143 = 1743 (using Triple max)
 
 use crate::Result;
 use crate::container::CipherAlgorithm;
@@ -37,8 +37,8 @@ use crate::crypto::kem::CT_SIZE;
 use crate::locked_memory::LockedMemory;
 
 /// Maximum VNMB-encrypted 32-byte payload across all supported ciphers.
-/// Triple = 63 (VNMB header with 3 nonces) + 32 (plaintext) + 64 (3 tags) = 159
-const VNMB_ENCRYPTED_32_MAX: usize = 159;
+/// Triple = 63 (VNMB header with 3 nonces) + 32 (plaintext) + 48 (3×EAX tags) = 143
+const VNMB_ENCRYPTED_32_MAX: usize = 143;
 
 /// Runtime VNMB-encrypted-32 size for a specific cipher.
 fn vnmb_enc_32(cipher: CipherAlgorithm) -> usize {

@@ -75,7 +75,7 @@ pub(crate) const BODY_AVAILABLE: usize = HEADER_SIZE - BODY_OFFSET;
 /// Must satisfy: vnmb_overhead(cipher) + body_len(cipher) ≤ BODY_AVAILABLE.
 pub(crate) fn body_len(cipher: CipherAlgorithm) -> usize {
     BODY_AVAILABLE - vnmb_overhead(cipher)
-    // Triple:         444 - (8+55+64) = 317
+    // Triple:         444 - (8+55+48) = 333
     // XChaCha20:      444 - (8+24+16) = 396
     // DeoxysII:       444 - (8+15+16) = 405
     // Serpent256-EAX: 444 - (8+16+16) = 404
