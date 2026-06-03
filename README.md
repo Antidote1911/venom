@@ -31,7 +31,7 @@ indistinguishable from encrypted data, enabling plausible deniability.
 | 0 | XChaCha20-Poly1305 | 192 bit | 16 B | 48 B | Default; birthday bound 2⁹⁶ |
 | 1 | Deoxys-II-256 | 120 bit | 16 B | 39 B | CAESAR "defense in depth" finalist |
 | 2 | Serpent-256-EAX | 128 bit | 16 B | 40 B | EAX = CTR + OMAC (Serpent-based) |
-| 3 | Triple (cascade) | 55 B (3×) | 64 B | 127 B | XChaCha20 → Deoxys-II-256 → Serpent-256-CTR/HMAC |
+| 3 | Triple (cascade) | 55 B (3×) | 64 B | 127 B | XChaCha20-Poly1305 → Deoxys-II-256 → Serpent-256 (3 layers) |
 
 ---
 
