@@ -103,7 +103,7 @@
             <item>
              <widget class="QLabel" name="lblEmptyState">
               <property name="text">
-               <string>No vaults mounted. Use the Mount section below to open a container.</string>
+               <string>No containers found. Create one in the Create tab or add .vnm files to ~/Documents/venom/</string>
               </property>
               <property name="alignment">
                <set>Qt::AlignmentFlag::AlignCenter</set>
@@ -128,41 +128,6 @@
             </item>
            </layout>
           </widget>
-         </widget>
-        </item>
-        <item>
-         <widget class="QGroupBox" name="grpDiscovered">
-          <property name="title">
-           <string>Containers in ~/Documents/venom/</string>
-          </property>
-          <layout class="QVBoxLayout">
-           <property name="spacing">
-            <number>4</number>
-           </property>
-           <item>
-            <widget class="QListWidget" name="listDiscovered">
-             <property name="maximumHeight">
-              <number>130</number>
-             </property>
-             <property name="alternatingRowColors">
-              <bool>true</bool>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QLabel" name="lblDiscoveredEmpty">
-             <property name="visible">
-              <bool>false</bool>
-             </property>
-             <property name="text">
-              <string>No containers found. Create one in the Create tab.</string>
-             </property>
-             <property name="alignment">
-              <set>Qt::AlignmentFlag::AlignCenter</set>
-             </property>
-            </widget>
-           </item>
-          </layout>
          </widget>
         </item>
         <item>

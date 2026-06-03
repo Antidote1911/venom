@@ -2,6 +2,7 @@
 #include <QMainWindow>
 #include <QVBoxLayout>
 #include <QList>
+#include <QFileInfo>
 #include "../backend/VenomCore.h"
 
 QT_BEGIN_NAMESPACE
@@ -44,10 +45,9 @@ private slots:
     void onDeleteKey();
 
 private:
-    void refreshVaultList();
-    void refreshDiscoveredVaults();
-    void addVaultCard(const MountedContainer& info);
-    void removeVaultCard(const QString& mountpoint);
+    void refreshUnifiedVaultList();
+    QWidget* makeMountedCard(const MountedContainer& mc);
+    QWidget* makeUnmountedCard(const QFileInfo& fi);
     void refreshKeyList();
     void refreshCreateKeyList();
     void refreshMountKeyList();

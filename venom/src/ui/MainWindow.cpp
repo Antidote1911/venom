@@ -19,36 +19,15 @@
 
 namespace Venom {
 
-// ── Vault card ────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-static QWidget* makeVaultCard(const MountedContainer& info, VenomCore* core, QWidget* parent)
+static QString formatFileSize(qint64 bytes)
 {
-    auto* card = new QGroupBox(
-        info.label.isEmpty() ? QStringLiteral("(unlabelled)") : info.label, parent);
-
-    auto* layout  = new QHBoxLayout(card);
-    auto* infoLbl = new QLabel(
-        info.vaultPath + QStringLiteral("\n") + info.mountpoint + QStringLiteral("\n") +
-        info.cipher + QStringLiteral("  •  ") +
-        info.createdAt.toString(QStringLiteral("yyyy-MM-dd")) +
-        (info.isHidden ? QStringLiteral("  •  [hidden volume]") : QString{}));
-    infoLbl->setWordWrap(true);
-    layout->addWidget(infoLbl, 1);
-
-    auto* btnOpen    = new QPushButton(QStringLiteral("Open folder"));
-    auto* btnUnmount = new QPushButton(QStringLiteral("Unmount"));
-
-    const QString mp = info.mountpoint;
-    QObject::connect(btnOpen,    &QPushButton::clicked, [mp]{ QDesktopServices::openUrl(QUrl::fromLocalFile(mp)); });
-    QObject::connect(btnUnmount, &QPushButton::clicked, [core, mp]{ core->unmount(mp); });
-
-    auto* btnBox = new QVBoxLayout;
-    btnBox->addWidget(btnOpen);
-    btnBox->addWidget(btnUnmount);
-    layout->addLayout(btnBox);
-
-    card->setProperty("mountpoint", info.mountpoint);
-    return card;
+    if (bytes >= 1024LL * 1024 * 1024)
+        return QStringLiteral("%1 GB").arg(bytes / (1024.0 * 1024 * 1024), 0, 'f', 1);
+    if (bytes >= 1024 * 1024)
+        return QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024), 0, 'f', 1);
+    return QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 0);
 }
 
 // ── MainWindow ────────────────────────────────────────────────────────────────
@@ -127,16 +106,9 @@ MainWindow::MainWindow(QWidget* parent)
 
     // Refresh lists whenever a relevant tab is shown
     connect(ui->tabWidget, &QTabWidget::currentChanged, this, [this](int idx){
-        if (idx == 0) { refreshDiscoveredVaults(); refreshMountKeyList(); }
+        if (idx == 0) { refreshUnifiedVaultList(); refreshMountKeyList(); }
         if (idx == 1) refreshCreateKeyList();
         if (idx == 2) refreshKeyList();
-    });
-
-    // Double-click on a discovered vault → pre-fill Mount form and switch tab
-    connect(ui->listDiscovered, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
-        const QString path = item->data(Qt::UserRole).toString();
-        ui->leVaultPath->setText(path);
-        ui->tabWidget->setCurrentIndex(0); // stay on Vaults tab; Mount section is below
     });
 
     // When a local key is selected, clear the external path field to avoid ambiguity
@@ -153,65 +125,126 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_core, &VenomCore::keyGenerated,     this, &MainWindow::onKeyGenerated);
     connect(m_core, &VenomCore::errorOccurred,    this, &MainWindow::onError);
 
-    refreshVaultList();
-    refreshDiscoveredVaults();
+    refreshUnifiedVaultList();
 }
 
 MainWindow::~MainWindow() { delete ui; }
 
-// ── Vault list ────────────────────────────────────────────────────────────────
+// ── Unified vault list ────────────────────────────────────────────────────────
 
-void MainWindow::refreshVaultList()
+void MainWindow::refreshUnifiedVaultList()
 {
-    ui->lblEmptyState->setVisible(m_core->mountedContainers().isEmpty());
-}
-
-void MainWindow::addVaultCard(const MountedContainer& info)
-{
-    auto* card = makeVaultCard(info, m_core, ui->vaultListContainer);
-    m_vaultLayout->insertWidget(m_vaultLayout->count() - 1, card);
-    ui->lblEmptyState->setVisible(false);
-}
-
-void MainWindow::removeVaultCard(const QString& mountpoint)
-{
-    for (int i = 0; i < m_vaultLayout->count(); ++i) {
-        auto* item = m_vaultLayout->itemAt(i);
-        if (!item || !item->widget()) continue;
-        if (item->widget()->property("mountpoint").toString() == mountpoint) {
-            item->widget()->deleteLater();
-            m_vaultLayout->removeItem(item);
-            break;
-        }
+    // Clear all existing cards
+    while (m_vaultLayout->count() > 0) {
+        QLayoutItem* item = m_vaultLayout->takeAt(0);
+        if (item->widget()) item->widget()->deleteLater();
+        delete item;
     }
-    refreshVaultList();
-}
 
-void MainWindow::refreshDiscoveredVaults()
-{
-    // Collect currently mounted vault paths to exclude them
-    QStringList mountedPaths;
-    for (const auto& mc : m_core->mountedContainers())
-        mountedPaths << QFileInfo(mc.vaultPath).canonicalFilePath();
+    // Build a map: canonical path → MountedContainer (for mounted state)
+    const QList<MountedContainer> mounted = m_core->mountedContainers();
+    QHash<QString, MountedContainer> mountedByPath;
+    for (const auto& mc : mounted)
+        mountedByPath.insert(QFileInfo(mc.vaultPath).canonicalFilePath(), mc);
 
-    // Scan default container directory
+    // Collect all entries: mounted first, then discovered-unmounted
+    QStringList seenPaths;
+
+    // 1. Mounted containers (in any directory)
+    for (const auto& mc : mounted) {
+        const QString canonical = QFileInfo(mc.vaultPath).canonicalFilePath();
+        seenPaths << canonical;
+        m_vaultLayout->addWidget(makeMountedCard(mc));
+    }
+
+    // 2. Unmounted containers from default directory
     QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     if (docs.isEmpty()) docs = QDir::homePath();
     const QDir dir(docs + QStringLiteral("/venom/"));
-
-    ui->listDiscovered->clear();
     const auto entries = dir.entryInfoList({QStringLiteral("*.vnm")}, QDir::Files, QDir::Name);
     for (const auto& fi : entries) {
-        if (mountedPaths.contains(fi.canonicalFilePath())) continue;
-        auto* item = new QListWidgetItem(fi.fileName());
-        item->setData(Qt::UserRole, fi.absoluteFilePath());
-        item->setToolTip(fi.absoluteFilePath());
-        ui->listDiscovered->addItem(item);
+        if (seenPaths.contains(fi.canonicalFilePath())) continue;
+        m_vaultLayout->addWidget(makeUnmountedCard(fi));
     }
 
-    const bool hasEntries = ui->listDiscovered->count() > 0;
-    ui->listDiscovered->setVisible(hasEntries);
-    ui->lblDiscoveredEmpty->setVisible(!hasEntries);
+    // Trailing spacer
+    m_vaultLayout->addStretch();
+
+    ui->lblEmptyState->setVisible(mounted.isEmpty() && entries.isEmpty());
+}
+
+QWidget* MainWindow::makeMountedCard(const MountedContainer& mc)
+{
+    auto* card   = new QGroupBox(ui->vaultListContainer);
+    auto* layout = new QHBoxLayout(card);
+
+    // Info column
+    auto* info   = new QVBoxLayout;
+    const qint64 sz = QFileInfo(mc.vaultPath).size();
+
+    auto* row1 = new QLabel(
+        QStringLiteral("<b>%1</b>").arg(QFileInfo(mc.vaultPath).fileName()) +
+        QStringLiteral("&nbsp;&nbsp;<span style='color:#27ae60'>● Mounted</span>"));
+    row1->setTextFormat(Qt::RichText);
+
+    auto* row2 = new QLabel(mc.vaultPath + QStringLiteral("  •  ") + formatFileSize(sz));
+    row2->setWordWrap(true);
+
+    QString meta = mc.cipher;
+    if (!mc.label.isEmpty())   meta.prepend(mc.label + QStringLiteral("  •  "));
+    if (mc.isHidden)           meta += QStringLiteral("  •  [hidden]");
+    meta += QStringLiteral("  •  ") + mc.createdAt.toString(QStringLiteral("yyyy-MM-dd"));
+    auto* row3 = new QLabel(meta);
+    row3->setStyleSheet(QStringLiteral("color: gray; font-size: 11px;"));
+
+    info->addWidget(row1);
+    info->addWidget(row2);
+    info->addWidget(row3);
+    layout->addLayout(info, 1);
+
+    // Buttons column
+    auto* btnOpen    = new QPushButton(QStringLiteral("Open folder"));
+    auto* btnUnmount = new QPushButton(QStringLiteral("Unmount"));
+    const QString mp = mc.mountpoint;
+    QObject::connect(btnOpen,    &QPushButton::clicked, [mp]{ QDesktopServices::openUrl(QUrl::fromLocalFile(mp)); });
+    QObject::connect(btnUnmount, &QPushButton::clicked, [this, mp]{ m_core->unmount(mp); });
+    auto* btns = new QVBoxLayout;
+    btns->addWidget(btnOpen);
+    btns->addWidget(btnUnmount);
+    layout->addLayout(btns);
+
+    return card;
+}
+
+QWidget* MainWindow::makeUnmountedCard(const QFileInfo& fi)
+{
+    auto* card   = new QGroupBox(ui->vaultListContainer);
+    auto* layout = new QHBoxLayout(card);
+
+    // Info column
+    auto* info = new QVBoxLayout;
+
+    auto* row1 = new QLabel(
+        QStringLiteral("<b>%1</b>").arg(fi.fileName()) +
+        QStringLiteral("&nbsp;&nbsp;<span style='color:#7f8c8d'>○ Not mounted</span>"));
+    row1->setTextFormat(Qt::RichText);
+
+    auto* row2 = new QLabel(fi.absoluteFilePath() + QStringLiteral("  •  ") + formatFileSize(fi.size()));
+    row2->setWordWrap(true);
+
+    info->addWidget(row1);
+    info->addWidget(row2);
+    layout->addLayout(info, 1);
+
+    // Mount button
+    auto* btnMount = new QPushButton(QStringLiteral("Mount"));
+    const QString path = fi.absoluteFilePath();
+    QObject::connect(btnMount, &QPushButton::clicked, [this, path]{
+        ui->leVaultPath->setText(path);
+    });
+    layout->addWidget(btnMount, 0, Qt::AlignTop);
+
+    return card;
 }
 
 // ── Key lists ─────────────────────────────────────────────────────────────────
@@ -484,17 +517,15 @@ void MainWindow::onDeleteKey()
 
 void MainWindow::onMountStarted(const MountedContainer& info)
 {
-    addVaultCard(info);
-    refreshDiscoveredVaults(); // remove newly-mounted vault from the discovered list
+    refreshUnifiedVaultList();
     ui->tabWidget->setCurrentIndex(0);
     statusBar()->showMessage(QStringLiteral("Mounted: ") + info.mountpoint, 5000);
 }
 
 void MainWindow::onMountGone(const QString& mp)
 {
-    removeVaultCard(mp);
     statusBar()->showMessage(QStringLiteral("Unmounted: ") + mp, 4000);
-    refreshDiscoveredVaults();
+    refreshUnifiedVaultList();
     // Reset mount form fields so the next vault auto-fills the mountpoint
     m_mountpointManual = false;
     ui->leVaultPath->clear();
@@ -509,7 +540,7 @@ void MainWindow::onMountError(const QString&, const QString& error)
 void MainWindow::onContainerCreated(const QString& path)
 {
     statusBar()->showMessage(QStringLiteral("Container created: ") + path, 5000);
-    refreshDiscoveredVaults();
+    refreshUnifiedVaultList();
     // Clear create form and reset path to auto-mode for next container
     m_containerPathManual = false;
     ui->leLabel->clear();  // triggers textChanged → resets lePath to default
