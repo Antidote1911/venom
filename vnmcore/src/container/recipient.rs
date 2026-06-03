@@ -31,13 +31,14 @@ use crate::crypto::hybrid_kem::X25519_PK_SIZE;
 use crate::crypto::kem::CT_SIZE;
 use crate::locked_memory::LockedMemory;
 
-/// Byte size of a VNMB-encrypted 32-byte payload for the given cipher.
-/// This is the maximum (XChaCha20) size used to size the fixed slot buffers.
-const VNMB_ENCRYPTED_32_MAX: usize = 32 + 32 + 16; // 80 (XChaCha20: nonce24+payload32+tag16)
+/// Maximum VNMB-encrypted 32-byte payload across all supported ciphers.
+/// Triple = 63 (VNMB header with 3 nonces) + 32 (plaintext) + 64 (3 tags) = 159
+const VNMB_ENCRYPTED_32_MAX: usize = 159;
 
 /// Runtime VNMB-encrypted-32 size for a specific cipher.
 fn vnmb_enc_32(cipher: CipherAlgorithm) -> usize {
-    vnmb_header_len(cipher) + 32 + 16
+    use crate::crypto::vnmb_overhead;
+    vnmb_overhead(cipher) + 32
 }
 
 pub const PW_SLOT_SIZE:  usize = 32 + 1 + VNMB_ENCRYPTED_32_MAX; // 113
@@ -66,9 +67,9 @@ pub fn encode_password_slot(
     Ok(buf)
 }
 
-/// Ciphers tried in order during blind decryption.
+/// Ciphers tried in order during blind decryption (single-cipher containers only).
 const ALL_CIPHERS: &[CipherAlgorithm] =
-    &[CipherAlgorithm::XChaCha20Poly1305, CipherAlgorithm::Aes256Gcm];
+    &[CipherAlgorithm::XChaCha20Poly1305, CipherAlgorithm::Aes256Gcm, CipherAlgorithm::Triple];
 
 /// Attempt to decrypt K_master from a password slot without knowing the cipher.
 ///

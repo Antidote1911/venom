@@ -13,6 +13,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 
 // ── Basic create / open ───────────────────────────────────────────────────────
 
+
 #[test]
 fn create_and_reopen_chacha() {
     let path = tmp("chacha");

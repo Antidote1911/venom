@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 pub enum CipherAlgorithm {
     XChaCha20Poly1305 = 0,
     Aes256Gcm         = 1,
+    /// XChaCha20-Poly1305 → Deoxys-II-256 → Serpent-256-CTR + HMAC-SHA256
+    Triple            = 2,
 }
 
 impl CipherAlgorithm {
@@ -25,6 +27,7 @@ impl CipherAlgorithm {
         match self {
             CipherAlgorithm::XChaCha20Poly1305 => "xchacha20-poly1305",
             CipherAlgorithm::Aes256Gcm         => "aes-256-gcm",
+            CipherAlgorithm::Triple            => "triple-xchacha20-deoxys-serpent",
         }
     }
 }

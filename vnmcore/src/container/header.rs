@@ -44,7 +44,7 @@ use rand::RngCore;
 
 use crate::{Result, VnmError};
 use crate::container::{CipherAlgorithm, kdf_params_for_profile};
-use crate::crypto::{encrypt_block, decrypt_block, vnmb_header_len};
+use crate::crypto::{encrypt_block, decrypt_block, vnmb_header_len, vnmb_overhead};
 
 pub const HEADER_SIZE:        usize = 512;
 pub const HEADER_REGION_SIZE: u64   = 1024;
@@ -53,27 +53,39 @@ pub const SLOT_SIZE:          usize = 32_768;
 // Recipient area constants (fixed layout — no need to move data when adding/removing recipients)
 pub const MAX_PASSWORD_SLOTS: usize = 8;
 pub const MAX_KEY_SLOTS:      usize = 8;
-pub const PW_SLOT_SIZE:       usize = super::recipient::PW_SLOT_SIZE;   // 113
-pub const KEY_SLOT_SIZE:      usize = super::recipient::KEY_SLOT_SIZE;  // 1680
+pub const PW_SLOT_SIZE:       usize = super::recipient::PW_SLOT_SIZE;   // 192
+pub const KEY_SLOT_SIZE:      usize = super::recipient::KEY_SLOT_SIZE;  // 1759
 pub const RECIPIENT_AREA_SIZE: usize = MAX_PASSWORD_SLOTS * PW_SLOT_SIZE + MAX_KEY_SLOTS * KEY_SLOT_SIZE;
-// = 8 * 113 + 8 * 1680 = 904 + 13440 = 14344
+// = 8 * 192 + 8 * 1759 = 1536 + 14072 = 15608
 
 /// Byte offset where slot 0 starts.
 pub const DATA_AREA_OFFSET: u64 = HEADER_REGION_SIZE + RECIPIENT_AREA_SIZE as u64;
-// = 1024 + 14344 = 15368
+// = 1024 + 15608 = 16632
 
 pub const MAGIC:          &[u8; 4] = b"VNM1";
 pub const FORMAT_VERSION: u32      = 1;
 
 const SALT_LEN:     usize = 64;
 const BODY_OFFSET:  usize = 68;   // after salt(64) + cipher(1) + profile(1) + n_pw(1) + n_key(1) = 68
+/// Available bytes for the encrypted block inside the 512-byte header.
+/// HEADER_SIZE - BODY_OFFSET = 512 - 68 = 444 bytes.
+pub(crate) const BODY_AVAILABLE: usize = HEADER_SIZE - BODY_OFFSET;
+
+/// Plaintext body length for a given cipher.
+/// Must satisfy: vnmb_overhead(cipher) + body_len(cipher) ≤ BODY_AVAILABLE.
+pub(crate) fn body_len(cipher: CipherAlgorithm) -> usize {
+    BODY_AVAILABLE - vnmb_overhead(cipher)
+    // Triple: 444 - (8+55+64) = 444 - 127 = 317
+    // XChaCha20: 444 - (8+24+16) = 444 - 48 = 396
+    // AES-256-GCM: 444 - (8+16+16) = 444 - 40 = 404 (but we keep parity with XChaCha20)
+}
+
+/// Default BODY_LEN used for single-cipher non-triple containers.
 pub(crate) const BODY_LEN: usize = 396;
 
 /// Size of the VNMB-encrypted header body on disk for a given cipher.
-/// XChaCha20-Poly1305: 32 (VNMB header) + 396 (body) + 16 (tag) = 444
-/// AES-256-GCM:        20 (VNMB header) + 396 (body) + 16 (tag) = 432
 pub(crate) fn enc_body_size(cipher: CipherAlgorithm) -> usize {
-    vnmb_header_len(cipher) + BODY_LEN + 16
+    vnmb_overhead(cipher) + body_len(cipher)
 }
 
 const AAD_OUTER:  &[u8] = b"vnm:header:outer:v1";
@@ -115,7 +127,8 @@ pub fn encode_header(
     buf[66] = payload.num_password_slots;
     buf[67] = payload.num_key_slots;
 
-    let mut body = [0u8; BODY_LEN];
+    let blen = body_len(payload.cipher);
+    let mut body = vec![0u8; blen];
     body[0..4].copy_from_slice(MAGIC);
     body[4..8].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
     body[8..16].copy_from_slice(&DATA_AREA_OFFSET.to_le_bytes());

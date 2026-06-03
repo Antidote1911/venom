@@ -108,3 +108,55 @@ fn encrypt_produces_different_nonces() {
 
     assert_ne!(c1, c2, "successive encryptions must use different nonces");
 }
+
+#[test]
+fn triple_cipher_round_trip() {
+    let key = derive_test_key(b"triple-test");
+    let plaintext = b"XChaCha20 + DeoxysII-256 + Serpent-256";
+    let aad = b"triple-aad";
+
+    let ct = encrypt_block(&key, CipherAlgorithm::Triple, aad, plaintext).unwrap();
+    let pt = decrypt_block(&key, CipherAlgorithm::Triple, aad, &ct).unwrap();
+    assert_eq!(pt, plaintext);
+}
+
+#[test]
+fn triple_cipher_wrong_key_fails() {
+    let key  = derive_test_key(b"key-a");
+    let key2 = derive_test_key(b"key-b");
+    let ct = encrypt_block(&key, CipherAlgorithm::Triple, b"aad", b"secret").unwrap();
+    assert!(decrypt_block(&key2, CipherAlgorithm::Triple, b"aad", &ct).is_err());
+}
+
+#[test]
+fn triple_cipher_tampered_tag_fails() {
+    let key = derive_test_key(b"key");
+    let mut ct = encrypt_block(&key, CipherAlgorithm::Triple, b"aad", b"data").unwrap();
+    let last = ct.len() - 1;
+    ct[last] ^= 0xFF; // flip a bit in the outer HMAC tag
+    assert!(decrypt_block(&key, CipherAlgorithm::Triple, b"aad", &ct).is_err());
+}
+
+#[test]
+fn triple_cipher_wrong_aad_fails() {
+    let key = derive_test_key(b"key");
+    let ct = encrypt_block(&key, CipherAlgorithm::Triple, b"aad-correct", b"data").unwrap();
+    assert!(decrypt_block(&key, CipherAlgorithm::Triple, b"aad-wrong", &ct).is_err());
+}
+
+#[test]
+fn triple_container_create_open() {
+    use vnmcore::fs::container::{VnmContainer, OpenCredential};
+    use std::path::PathBuf;
+    let path: PathBuf = std::env::temp_dir()
+        .join(format!("vnm_triple_{}.vnm", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    VnmContainer::create(&path, b"pw", 4 * 1024 * 1024,
+        CipherAlgorithm::Triple, "interactive", Some("triple test".into()), None).unwrap();
+
+    let c = VnmContainer::open(&path, OpenCredential::Password(b"pw")).unwrap();
+    assert_eq!(c.cipher, CipherAlgorithm::Triple);
+    assert_eq!(c.label.as_deref(), Some("triple test"));
+    std::fs::remove_file(&path).ok();
+}
