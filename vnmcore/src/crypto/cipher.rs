@@ -1,3 +1,8 @@
+// AeadInPlace, Array::from_slice and related items are deprecated in aead 0.6-rc.
+// They remain functional. Migration to AeadInOut + InOutBuf is deferred until
+// aead 0.6 reaches a stable release.
+#![allow(deprecated)]
+
 use aes_gcm::{AesGcm, KeyInit};
 use aes_gcm::aead::AeadInPlace;
 use aes_gcm::aes::Aes256;
@@ -79,15 +84,6 @@ fn derive_subkey_32(k_master: &[u8; 32], label: &[u8]) -> [u8; 32] {
     mac.finalize().into_bytes().into()
 }
 
-fn derive_subkey_24(k_master: &[u8; 32], label: &[u8]) -> [u8; 24] {
-    let full = derive_subkey_32(k_master, label);
-    full[..24].try_into().unwrap()
-}
-
-fn derive_subkey_16(k_master: &[u8; 32], label: &[u8]) -> [u8; 16] {
-    let full = derive_subkey_32(k_master, label);
-    full[..16].try_into().unwrap()
-}
 
 struct TripleKeys {
     k1:     [u8; 32],  // XChaCha20-Poly1305  (256-bit)

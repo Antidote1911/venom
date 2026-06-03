@@ -25,7 +25,7 @@
 use crate::Result;
 use crate::container::CipherAlgorithm;
 use crate::container::kdf_params_for_profile_id;
-use crate::crypto::{derive_key, encrypt_block, decrypt_block_into_32, vnmb_header_len};
+use crate::crypto::{derive_key, encrypt_block, decrypt_block_into_32};
 use crate::crypto::hybrid_kem::{HybridPublicKey, HybridPrivateKey, encapsulate, decapsulate};
 use crate::crypto::hybrid_kem::X25519_PK_SIZE;
 use crate::crypto::kem::CT_SIZE;

@@ -44,7 +44,7 @@ use rand::RngCore;
 
 use crate::{Result, VnmError};
 use crate::container::{CipherAlgorithm, kdf_params_for_profile};
-use crate::crypto::{encrypt_block, decrypt_block, vnmb_header_len, vnmb_overhead};
+use crate::crypto::{encrypt_block, decrypt_block, vnmb_overhead};
 
 pub const HEADER_SIZE:        usize = 512;
 pub const HEADER_REGION_SIZE: u64   = 1024;
