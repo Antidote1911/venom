@@ -36,6 +36,7 @@ to `master`. There are no backport branches.
 |----------|-------|
 | Default cipher | XChaCha20-Poly1305 — 192-bit random nonce (birthday bound 2⁹⁶) |
 | Alt cipher | AES-256-GCM — 128-bit random nonce (birthday bound 2⁶⁴, non-standard IV via GHASH) |
+| Triple cipher | XChaCha20-Poly1305 + Deoxys-II-256 + Serpent-128-CTR/HMAC-SHA256 — 127 B overhead per slot |
 | Integrity | 128-bit AEAD tag per slot |
 | AAD | `slot_index as u64 LE` — binds ciphertext to physical location |
 | Cipher anonymity | Byte 64 of the header is always `0`; the real cipher is discovered blindly via AEAD during open. An observer without the password cannot determine which cipher a container uses. |
@@ -112,12 +113,16 @@ returned to the free list. Deleted files leave no recoverable ciphertext.
 
 | Crate | Algorithm | Notes |
 |-------|-----------|-------|
-| `aes-gcm` | AES-256-GCM with 16-byte nonce | RustCrypto, kept up to date |
-| `chacha20poly1305` | XChaCha20-Poly1305 (192-bit nonce) | RustCrypto, kept up to date |
-| `ml-kem` | ML-KEM-1024 (FIPS 203) | RustCrypto, kept up to date |
-| `x25519-dalek` | X25519 ECDH | kept up to date |
-| `argon2` | Argon2id (RFC 9106) | RustCrypto, kept up to date |
-| `sha2` | SHA-256 | RustCrypto, kept up to date |
+| `aes-gcm 0.11-rc.4` | AES-256-GCM with 16-byte nonce | RustCrypto, kept up to date |
+| `chacha20poly1305 0.11-rc.3` | XChaCha20-Poly1305 (192-bit nonce) | RustCrypto, kept up to date |
+| `deoxys 0.2.0-rc.3` | Deoxys-II-256 (CAESAR "defense in depth") | RustCrypto, Triple cipher layer 2 |
+| `serpent 0.6.0` | Serpent-128 in CTR mode | RustCrypto, Triple cipher layer 3 |
+| `ctr 0.10.1` | Generic CTR mode | RustCrypto |
+| `ml-kem 0.3` | ML-KEM-1024 (FIPS 203) | RustCrypto, kept up to date |
+| `x25519-dalek 2` | X25519 ECDH | kept up to date |
+| `argon2 0.5` | Argon2id (RFC 9106) | RustCrypto, kept up to date |
+| `sha2 0.10` | SHA-256 | RustCrypto, kept up to date |
+| `hmac 0.12` | HMAC-SHA256 (Triple cipher MAC) | RustCrypto, kept up to date |
 | `zeroize` | Memory zeroing on drop | RustCrypto, kept up to date |
 | `libc` | `mlock(2)` / `munlock(2)` | Unix only, for K_master swap protection |
 

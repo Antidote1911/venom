@@ -10,7 +10,7 @@ indistinguishable from encrypted data, enabling plausible deniability.
 
 ## Features
 
-- **AEAD encryption** — XChaCha20-Poly1305 (192-bit nonce, default) or AES-256-GCM (128-bit nonce); one 128-bit auth tag per 30 KB slot
+- **AEAD encryption** — XChaCha20-Poly1305 (192-bit nonce, default), AES-256-GCM (128-bit nonce), or **Triple** (XChaCha20 + Deoxys-II-256 + Serpent-CTR/HMAC); one or three auth tags per 30 KB slot
 - **Cipher anonymity** — cipher choice is never exposed in plaintext; discovered blindly via AEAD on open
 - **Memory-hard KDF** — Argon2id (interactive: 64 MiB / sensitive: 256 MiB)
 - **Post-quantum recipients** — X25519 + ML-KEM-1024 hybrid KEM (NIST FIPS 203)
@@ -31,7 +31,7 @@ indistinguishable from encrypted data, enabling plausible deniability.
 |----------|:---------:|:-----:|
 | Property | VeraCrypt | Venom |
 |----------|:---------:|:-----:|
-| **Encryption mode** | XTS-AES (no integrity) | AEAD per slot (XChaCha20-Poly1305 / AES-256-GCM) |
+| **Encryption mode** | XTS-AES (no integrity) | AEAD per slot (XChaCha20 / AES-256-GCM / Triple) |
 | **Per-block authentication** | ✗ silent corruption possible | ✓ 128-bit tag, decryption fails on tampering |
 | **Slot-swap / relocation attack** | ✗ | ✓ slot index as AAD |
 | **Nonce** | Deterministic (sector number) | 192-bit random (XChaCha20) / 128-bit random (AES) |
@@ -46,7 +46,7 @@ indistinguishable from encrypted data, enabling plausible deniability.
 | **Forward secrecy (deleted files)** | ✗ ciphertext remains on disk | ✓ slot wiped with random bytes on free |
 | **Key material in locked memory** | ✗ | ✓ K_master in `mlock`'d heap, never swapped |
 | **Header backup** | ✓ redundant copy | ✓ outer at EOF, hidden at [512..1024] (geographic separation) |
-| **Cipher cascades** | ✓ AES-Twofish-Serpent… | ✗ one cipher per container |
+| **Cipher cascades** | ✓ AES-Twofish-Serpent… | ✓ Triple: XChaCha20 + Deoxys-II-256 + Serpent |
 | **Inner filesystem** | FAT / exFAT / ext4 / NTFS | Custom VaultNode (msgpack) |
 | **Single-file container** | ✓ | ✓ |
 | **FUSE mount** | ✓ | ✓ |
@@ -110,7 +110,7 @@ VnmContainer::create(
     "vault.vnm",
     b"my-password",
     512 * 1024 * 1024,          // 512 MB
-    CipherAlgorithm::XChaCha20Poly1305,
+    CipherAlgorithm::XChaCha20Poly1305, // or ::Aes256Gcm or ::Triple
     "interactive",
     Some("My vault".into()),
     None,                        // no hidden volume

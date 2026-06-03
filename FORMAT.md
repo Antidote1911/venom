@@ -14,7 +14,7 @@ Offset          Taille          Description
 ────────────────────────────────────────────────────────────────────────────────
 0               512             En-tête extérieur — primaire
 512             512             En-tête caché — backup¹  (ou aléatoire si pas de volume caché)
-1 024           14 344          Zone destinataires (password slots + key slots)
+1 024           15 608          Zone destinataires (password slots + key slots)
 15 368          N × 32 768      Zone de données
 EOF − 1 024     512             En-tête extérieur — backup¹  (ou aléatoire si pas de volume caché)
 EOF − 512       512             En-tête caché — primaire¹  (ou aléatoire si pas de volume caché)
@@ -42,14 +42,14 @@ Constantes :
 | `HEADER_REGION_SIZE`   |   1 024 | fixe (2 × 512)                                |
 | `MAX_PASSWORD_SLOTS`   |       8 | fixe                                          |
 | `MAX_KEY_SLOTS`        |       8 | fixe                                          |
-| `PW_SLOT_SIZE`         |     113 | 32 + 1 + 80                                   |
-| `KEY_SLOT_SIZE`        |   1 680 | 32 + 1 568 + 80                               |
-| `RECIPIENT_AREA_SIZE`  |  14 344 | 8 × 113 + 8 × 1 680                           |
-| `DATA_AREA_OFFSET`     |  15 368 | 1 024 + 14 344                                |
+| `PW_SLOT_SIZE`         |     192 | 32 + 1 + 159  (Triple max)                    |
+| `KEY_SLOT_SIZE`        |   1 759 | 32 + 1 568 + 159                              |
+| `RECIPIENT_AREA_SIZE`  |  15 608 | 8 × 192 + 8 × 1 759                           |
+| `DATA_AREA_OFFSET`     |  16 632 | 1 024 + 15 608                                |
 | `SLOT_SIZE`            |  32 768 | fixe                                          |
 
 Taille minimale d'un fichier conteneur :
-`DATA_AREA_OFFSET + 16 × SLOT_SIZE + 512 = 15 368 + 524 288 + 512 = 540 168 octets`
+`DATA_AREA_OFFSET + 16 × SLOT_SIZE + 512 = 16 632 + 524 288 + 512 = 541 432 octets`
 
 ---
 
@@ -118,7 +118,7 @@ Offset  Taille  Type        Description
 4        4      u32 LE      version du corps
                               1 = volume extérieur (encode_header)
                               3 = volume caché (encode_header_with_password)
-8        8      u64 LE      data_area_offset = 15 368
+8        8      u64 LE      data_area_offset = 16 632
 16       8      u64 LE      outer_slots
                               volume extérieur : nombre de slots alloués
                               volume caché     : nombre de slots du volume caché
@@ -159,9 +159,9 @@ Disposition fixe, jamais réallouée :
 Offset                  Taille          Description
 ──────────────────────────────────────────────────────────────────────────
 1 024                   8 × 101 = 808   8 password slots (voir §3.1)
-1 024 + 904 = 1 928     8 × 1 680 = 13 440   8 hybrid key slots (voir §3.2)
+1 024 + 1 536 = 2 560   8 × 1 759 = 14 072   8 hybrid key slots (voir §3.2)
 ──────────────────────────────────────────────────────────────────────────
-Total                   14 344 octets
+Total                   15 608 octets
 ```
 
 Les slots inutilisés contiennent des octets aléatoires
@@ -249,14 +249,14 @@ Tailles de blocs courants :
 
 | Plaintext (P)  | Bloc (XChaCha20) | Bloc (AES-256-GCM 16B) | Utilisation                     |
 |---------------:|----------------:|----------------------:|----------------------------------|
-|         32 B   |         80 B    |                72 B   | K_master dans un slot destinataire |
+|         32 B   |         80 B    |         72 B / 159 B  | K_master (single / Triple)         |
 |        396 B   |        444 B    |               436 B   | Corps de l'en-tête               |
 |       ≤ 32 720 B | ≤ 32 768 B    |          ≤ 32 768 B   | Payload d'un slot de données     |
 |         96 B   |        144 B    |               136 B   | Clé privée protégée (.key)       |
 
 ---
 
-## 5. Zone de données (à partir de l'offset 15 368)
+## 5. Zone de données (à partir de l'offset 16 632)
 
 ### 5.1 Slot de données (32 768 octets)
 
@@ -489,10 +489,11 @@ Algorithme : Argon2id, version 0x13 (NIST SP 800-232).
 
 ### 7.2 Chiffrement authentifié (AEAD)
 
-| cipher_id | Algorithme            | Taille clé | Taille nonce | Borne collision | Tag      |
-|----------:|-----------------------|:----------:|:------------:|:---------------:|:--------:|
-| 0         | XChaCha20-Poly1305    | 256 bits   | **192 bits** | 2⁹⁶             | 128 bits |
-| 1         | AES-256-GCM (16B IV)  | 256 bits   | **128 bits** | 2⁶⁴             | 128 bits |
+| cipher_id | Algorithme                          | Nonce          | Borne collision | Overhead VNMB |
+|----------:|-------------------------------------|:--------------:|:---------------:|:-------------:|
+| 0         | XChaCha20-Poly1305 (défaut)         | **192 bits**   | 2⁹⁶             | 48 B          |
+| 1         | AES-256-GCM (16B IV non standard)   | **128 bits**   | 2⁶⁴             | 40 B          |
+| 2         | **Triple** (voir §7.3)              | 55 B (3×)      | max             | 127 B         |
 
 XChaCha20-Poly1305 est le chiffre par défaut.
 
@@ -530,6 +531,42 @@ hybrid_key = SHA-256(
 Sécurité : le conteneur reste sécurisé si **l'un des deux** algorithmes
 tient (X25519 contre l'attaquant classique, ML-KEM-1024 contre le quantique).
 
+### 7.3 Cipher Triple — détails
+
+Le cipher Triple (cipher_id=2) applique trois couches de chiffrement successives.
+
+**Clés dérivées de K_master via HMAC-SHA256 :**
+
+| Couche | Algorithme | Clé | Nonce |
+|--------|-----------|----:|------:|
+| 1 | XChaCha20-Poly1305 | 32 B | 24 B |
+| 2 | Deoxys-II-256 (CAESAR "defense in depth") | 32 B | 15 B |
+| 3 | Serpent-128-CTR + HMAC-SHA256 | 16 B + 32 B | 16 B |
+
+```
+K1     = HMAC-SHA256(K_master, "\x01venom:triple:xchacha20")
+K2     = HMAC-SHA256(K_master, "\x02venom:triple:deoxys")
+K3_enc = HMAC-SHA256(K_master, "\x03venom:triple:serpent:enc")[0..16]
+K3_mac = HMAC-SHA256(K_master, "\x04venom:triple:serpent:mac")
+```
+
+**VNMB Triple block layout :**
+
+```
+[0..4]    magic b"VNMB"
+[4..8]    version u32 LE = 1
+[8..32]   nonce1 — 24 B (XChaCha20)
+[32..47]  nonce2 — 15 B (Deoxys-II-256)
+[47..63]  nonce3 — 16 B (Serpent-CTR)
+[63..]    encrypt(encrypt(encrypt(P))) + tag1(16) + tag2(16) + hmac(32)
+```
+
+Overhead total : 8 + 55 (nonces) + 64 (tags) = **127 B** par plaintext.
+`body_len(Triple)` = 444 − 127 = **317 B** (tient dans le header 512 B).
+
+**Note Deoxys-II-256 :** DeoxysBc384 = clé 256 bits + tweak 128 bits.
+La clé effective est **32 octets** (256 bits), pas 24.
+
 ### 7.4 Fingerprint (fichiers de clés uniquement)
 
 ```
@@ -548,12 +585,12 @@ l'aveugle pour préserver l'anonymat des destinataires.
 ```
 1. Tenter d'ouvrir l'en-tête extérieur primaire [0..512] :
      a. Lire kdf_profile, num_password_slots, num_key_slots (byte 64 ignoré — toujours 0)
-     b. Pour chaque password slot [0..num_password_slots) à offset (1024 + i×113) :
+     b. Pour chaque password slot [0..num_password_slots) à offset (1024 + i×192) :
           slot_key = Argon2id(password, salt=slot[0..32], profile=slot[32])  [1× par slot]
           Pour chaque cipher {XChaCha20-Poly1305, AES-256-GCM} :
             K_master = AEAD_decrypt(slot_key, slot[33..33+E], cipher)
             Si succès → cipher découvert, aller en 1d
-     c. Pour chaque key slot [0..num_key_slots) à offset (1928 + j×1680) :
+     c. Pour chaque key slot [0..num_key_slots) à offset (2560 + j×1759) :
           shared_secret = ML-KEM-Decaps + X25519  [1× par slot]
           Pour chaque cipher {XChaCha20-Poly1305, AES-256-GCM} :
             K_master = AEAD_decrypt(shared_secret, slot[1600..1600+E], cipher)
