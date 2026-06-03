@@ -1,5 +1,6 @@
 pub mod vault_fs;
 pub mod slot_store;
+pub mod merkle;
 
 pub use vault_fs::{
     VaultNode, NodeKind, DirEntry, DirectoryBlock,

@@ -46,4 +46,7 @@ pub enum VnmError {
 
     #[error("Rollback detected: container generation {current_gen} < last known {expected_gen} — the container may have been replaced with an older copy")]
     RollbackDetected { current_gen: u64, expected_gen: u64 },
+
+    #[error("Merkle integrity check failed — one or more encrypted slots were modified or removed since last close")]
+    MerkleIntegrityFailure,
 }

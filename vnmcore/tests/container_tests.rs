@@ -354,3 +354,63 @@ fn key_file_passphrase_protect_roundtrip() {
     assert_eq!(kf2.key.mlkem_seed,  key.mlkem_seed);
     assert!(kf2.is_protected);
 }
+
+// ── Merkle tree integrity ──────────────────────────────────────────────────────
+
+#[test]
+fn merkle_passes_after_flush() {
+    let path = tmp("merkle_ok");
+    let _ = std::fs::remove_file(&path);
+
+    // Create, write a file, flush (Merkle root computed and stored).
+    let c = VnmContainer::create(&path, b"pw", 4*MB, CipherAlgorithm::XChaCha20Poly1305,
+        "interactive", None, None).unwrap();
+    let node = VaultNode::File(FileBlock {
+        kind: NodeKind::File, total_size: 5,
+        data_slots: vec![], index_chain: None,
+        data: b"hello".to_vec(),
+    });
+    c.write_node(&node).unwrap();
+    c.flush().unwrap();
+    drop(c);
+
+    // Re-opening must succeed (Merkle root verifies).
+    assert!(VnmContainer::open(&path, OpenCredential::Password(b"pw")).is_ok());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn merkle_detects_tampered_slot() {
+    use vnmcore::container::DATA_AREA_OFFSET;
+    use vnmcore::container::SLOT_SIZE;
+
+    let path = tmp("merkle_tamper");
+    let _ = std::fs::remove_file(&path);
+
+    // Create container, write a node, flush.
+    let c = VnmContainer::create(&path, b"pw", 4*MB, CipherAlgorithm::XChaCha20Poly1305,
+        "interactive", None, None).unwrap();
+    let node = VaultNode::File(FileBlock {
+        kind: NodeKind::File, total_size: 3,
+        data_slots: vec![], index_chain: None,
+        data: b"abc".to_vec(),
+    });
+    let slot = c.write_node(&node).unwrap();
+    c.flush().unwrap();
+    drop(c);
+
+    // Externally flip a byte in that slot's raw encrypted data.
+    let offset = (DATA_AREA_OFFSET + slot * SLOT_SIZE as u64 + 10) as u64;
+    let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    use std::io::{Seek, SeekFrom, Write};
+    f.seek(SeekFrom::Start(offset)).unwrap();
+    f.write_all(&[0xFF]).unwrap();
+    drop(f);
+
+    // Re-opening must fail with MerkleIntegrityFailure.
+    match VnmContainer::open(&path, OpenCredential::Password(b"pw")) {
+        Err(VnmError::MerkleIntegrityFailure) => {}
+        other => panic!("expected MerkleIntegrityFailure, got: {:?}", other.err()),
+    }
+    std::fs::remove_file(&path).ok();
+}

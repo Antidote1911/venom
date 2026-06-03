@@ -500,6 +500,10 @@ impl VnmContainer {
     pub fn path(&self) -> &Path { &self.path }
 
     pub fn flush(&self) -> Result<()> {
+        // Recompute Merkle root if any slot was written or wiped since last computation.
+        if self.store.is_merkle_dirty() {
+            self.store.update_merkle_root()?;
+        }
         self.store.save_free_list()?;
         self.store.flush_file()?;
         // Persist updated generation to anti-rollback state (no-op for legacy containers)
