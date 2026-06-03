@@ -3,7 +3,7 @@
 //! ## Layout (512 bytes)
 //!
 //!   [0..64]    salt (64 bytes, plaintext — for Argon2id / key derivation)
-//!   [64]       cipher_id (0=ChaCha20-Poly1305, 1=AES-256-GCM)
+//!   [64]       cipher_id (0=XChaCha20-Poly1305, 1=AES-256-GCM-16)
 //!   [65]       kdf_profile_id (0=interactive, 1=sensitive)
 //!   [66]       num_password_slots (u8, plaintext — max MAX_PASSWORD_SLOTS)
 //!   [67]       num_key_slots (u8, plaintext — max MAX_KEY_SLOTS)

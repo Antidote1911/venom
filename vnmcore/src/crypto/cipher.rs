@@ -1,16 +1,26 @@
-use aes_gcm::{Aes256Gcm, KeyInit, AeadInPlace, Nonce as AesNonce};
+use aes_gcm::{AesGcm, KeyInit, AeadInPlace};
+use aes_gcm::aes::Aes256;
+use aes_gcm::aead::generic_array::{GenericArray, typenum::U16 as AesN16};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::RngCore;
 use crate::{Result, VnmError};
 use crate::container::CipherAlgorithm;
 
+// AES-256-GCM with a 16-byte (128-bit) random nonce.
+//
+// The standard GCM IV derivation maps any nonce length != 12 bytes through
+// GHASH, effectively hashing the nonce before use.  A 16-byte random nonce
+// raises the birthday collision bound from 2^48 (12-byte nonce) to 2^64,
+// matching the approach used by CryFS 2.0 for the same reason.
+type Aes256GcmN16 = AesGcm<Aes256, AesN16>;
+
 // On-disk VNMB block format (wraps every encrypted payload):
 //   [0..4]       magic  b"VNMB"
 //   [4..8]       version u32 LE = 1
-//   [8..8+N]     nonce   N=24 bytes (XChaCha20-Poly1305) or 12 bytes (AES-256-GCM)
+//   [8..8+N]     nonce   N=24 bytes (XChaCha20-Poly1305) or 16 bytes (AES-256-GCM)
 //   [8+N..]      ciphertext + 16-byte AEAD tag
 //
-// Total overhead: 48 B (XChaCha20) or 36 B (AES-256-GCM).
+// Total overhead: 48 B (XChaCha20) or 40 B (AES-256-GCM).
 
 const MAGIC:        &[u8; 4] = b"VNMB";
 const VERSION:      u32       = 1;
@@ -19,7 +29,7 @@ const NONCE_OFFSET: usize     = 8; // magic(4) + version(4)
 fn nonce_len(cipher: CipherAlgorithm) -> usize {
     match cipher {
         CipherAlgorithm::XChaCha20Poly1305 => 24,
-        CipherAlgorithm::Aes256Gcm         => 12,
+        CipherAlgorithm::Aes256Gcm         => 16,
     }
 }
 
@@ -52,8 +62,8 @@ pub fn encrypt_block(key: &[u8; 32], cipher: CipherAlgorithm, aad: &[u8], plaint
             buf.extend_from_slice(tag.as_slice());
         }
         CipherAlgorithm::Aes256Gcm => {
-            let c   = Aes256Gcm::new_from_slice(key).map_err(|e| VnmError::CipherError(e.to_string()))?;
-            let n   = AesNonce::from_slice(&nonce_bytes);
+            let c   = Aes256GcmN16::new_from_slice(key).map_err(|e| VnmError::CipherError(e.to_string()))?;
+            let n   = GenericArray::<u8, AesN16>::from_slice(&nonce_bytes);
             let tag = c.encrypt_in_place_detached(n, aad, &mut buf[hlen..]).map_err(|e| VnmError::CipherError(e.to_string()))?;
             buf.extend_from_slice(tag.as_slice());
         }
@@ -94,10 +104,10 @@ pub fn decrypt_block(key: &[u8; 32], cipher: CipherAlgorithm, aad: &[u8], data: 
             c.decrypt_in_place_detached(n, aad, &mut plain, t).map_err(|_| VnmError::AuthenticationFailed)?;
         }
         CipherAlgorithm::Aes256Gcm => {
-            use aes_gcm::Tag;
-            let c = Aes256Gcm::new_from_slice(key).map_err(|e| VnmError::CipherError(e.to_string()))?;
-            let n = AesNonce::from_slice(nonce_bytes);
-            let t = Tag::from_slice(tag_bytes);
+            use aes_gcm::aead::Tag;
+            let c = Aes256GcmN16::new_from_slice(key).map_err(|e| VnmError::CipherError(e.to_string()))?;
+            let n = GenericArray::<u8, AesN16>::from_slice(nonce_bytes);
+            let t = Tag::<Aes256GcmN16>::from_slice(tag_bytes);
             c.decrypt_in_place_detached(n, aad, &mut plain, t).map_err(|_| VnmError::AuthenticationFailed)?;
         }
     }

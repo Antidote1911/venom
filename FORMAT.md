@@ -82,18 +82,25 @@ Le bloc VNMB (voir §4) contient 396 octets de corps en clair chiffrés avec
 `K_master` (volume extérieur) ou `Argon2id(password, salt)` (volume caché).
 
 ```
-Offset  Taille  Description
+Offset  Taille  Description (XChaCha20-Poly1305 — chiffre par défaut)
 ──────────────────────────────────────────────────────────────────────────
 68       4      magic b"VNMB"
 72       4      version u32 LE = 1
-76      24      nonce 192 bits (aléatoire par écriture, XChaCha20)
+76      24      nonce 192 bits (aléatoire par écriture)
 100    396      corps chiffré (voir §2.3)
 496     16      tag AEAD
 ──────────────────────────────────────────────────────────────────────────
-```
 
-> Pour AES-256-GCM le nonce est de 12 octets : le VNMB header fait alors 20 octets
-> et le corps occupe [68..496] avec 16 octets inutilisés à la fin [496..512].
+Offset  Taille  Description (AES-256-GCM avec nonce 16 octets)
+──────────────────────────────────────────────────────────────────────────
+68       4      magic b"VNMB"
+72       4      version u32 LE = 1
+76      16      nonce 128 bits (aléatoire par écriture)
+92     396      corps chiffré (voir §2.3)
+488     16      tag AEAD
+[488..512] 8 octets de padding nul
+──────────────────────────────────────────────────────────────────────────
+```
 
 AAD (données authentifiées non chiffrées) :
 - En-tête extérieur : `b"vnm:header:outer:v1"`
@@ -234,12 +241,12 @@ Total = 36 + P octets
 
 Tailles de blocs courants :
 
-| Plaintext (P)  | Bloc (XChaCha20) | Bloc (AES-256-GCM) | Utilisation                     |
-|---------------:|----------------:|------------------:|----------------------------------|
-|         32 B   |         80 B    |          68 B     | K_master dans un slot destinataire |
-|        396 B   |        444 B    |         432 B     | Corps de l'en-tête               |
-|       ≤ 32 720 B | ≤ 32 768 B    |      ≤ 32 768 B   | Payload d'un slot de données     |
-|         96 B   |        144 B    |         132 B     | Clé privée protégée (.key)       |
+| Plaintext (P)  | Bloc (XChaCha20) | Bloc (AES-256-GCM 16B) | Utilisation                     |
+|---------------:|----------------:|----------------------:|----------------------------------|
+|         32 B   |         80 B    |                72 B   | K_master dans un slot destinataire |
+|        396 B   |        444 B    |               436 B   | Corps de l'en-tête               |
+|       ≤ 32 720 B | ≤ 32 768 B    |          ≤ 32 768 B   | Payload d'un slot de données     |
+|         96 B   |        144 B    |               136 B   | Clé privée protégée (.key)       |
 
 ---
 
@@ -475,14 +482,17 @@ Algorithme : Argon2id, version 0x13 (NIST SP 800-232).
 
 ### 7.2 Chiffrement authentifié (AEAD)
 
-| cipher_id | Algorithme            | Taille clé | Taille nonce | Tag      |
-|----------:|-----------------------|:----------:|:------------:|:--------:|
-| 0         | XChaCha20-Poly1305    | 256 bits   | **192 bits** | 128 bits |
-| 1         | AES-256-GCM           | 256 bits   | 96 bits      | 128 bits |
+| cipher_id | Algorithme            | Taille clé | Taille nonce | Borne collision | Tag      |
+|----------:|-----------------------|:----------:|:------------:|:---------------:|:--------:|
+| 0         | XChaCha20-Poly1305    | 256 bits   | **192 bits** | 2⁹⁶             | 128 bits |
+| 1         | AES-256-GCM (16B IV)  | 256 bits   | **128 bits** | 2⁶⁴             | 128 bits |
 
-XChaCha20-Poly1305 est le chiffre par défaut. Son nonce de 192 bits rend la
-probabilité de collision avec des nonces aléatoires négligeable (borne
-d'anniversaire à 2⁹⁶ ≈ 10²⁸ opérations, contre 2⁴⁸ pour un nonce 96 bits).
+XChaCha20-Poly1305 est le chiffre par défaut.
+
+Pour AES-256-GCM, le nonce est de **16 octets** (non standard). Lorsque la
+longueur du nonce est différente de 12 octets, GCM calcule l'IV comme
+`GHASH(nonce)`. Un nonce aléatoire de 16 octets repousse la borne d'anniversaire
+de 2⁴⁸ (nonce 12 B standard) à 2⁶⁴, suivant l'approche de CryFS 2.0.
 
 Le nonce est généré aléatoirement à chaque écriture (non incrémental).
 
