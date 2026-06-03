@@ -93,7 +93,7 @@ Offset  Taille  Type        Description
 4        4      u32 LE      version du corps
                               1 = volume extérieur (encode_header)
                               3 = volume caché (encode_header_with_password)
-8        8      u64 LE      data_area_offset = 15 240
+8        8      u64 LE      data_area_offset = 15 176
 16       8      u64 LE      outer_slots
                               volume extérieur : nombre de slots alloués
                               volume caché     : nombre de slots du volume caché
@@ -223,7 +223,7 @@ Tailles de blocs courants :
 
 ---
 
-## 5. Zone de données (à partir de l'offset 15 240)
+## 5. Zone de données (à partir de l'offset 15 176)
 
 ### 5.1 Slot de données (32 768 octets)
 
@@ -263,8 +263,18 @@ Le bit i du byte k correspond au slot `slot_start + k×8 + i`.
 ### 5.3 Nœuds du système de fichiers (MessagePack)
 
 Le plaintext de chaque slot de données (sauf le slot d'allocation) est un
-objet **MessagePack** (`rmp-serde`, format `to_vec_named`) représentant une
-des structures suivantes :
+objet **MessagePack** (`rmp-serde`, format `to_vec_named`) représentant un
+des quatre types suivants :
+
+Constantes du système de fichiers :
+
+| Constante           | Valeur  | Description                                     |
+|---------------------|--------:|-------------------------------------------------|
+| `CHUNK_SIZE`        |  30 000 | octets de données utiles par slot               |
+| `MAX_DIRECT_SLOTS`  |   4 000 | ids de slots max dans le slot tête (~120 Mo)    |
+| `MAX_INDEX_SLOTS`   |   4 080 | ids de slots max par `FileIndexBlock` (~120 Mo) |
+
+---
 
 #### Répertoire (`VaultNode::Directory`)
 
@@ -274,41 +284,101 @@ des structures suivantes :
     "kind": "directory",
     "entries": [
       { "name": "fichier.txt", "slot": 42, "kind": "file" },
-      { "name": "sous-dossier", "slot": 7, "kind": "directory" }
+      { "name": "sous-dossier", "slot": 7,  "kind": "directory" }
     ]
   }
 }
 ```
 
-#### Fichier — tête de chaîne (`VaultNode::File`, kind=`"file"`)
+---
+
+#### Fichier — slot tête (`VaultNode::File`, kind=`"file"`)
+
+Contient les métadonnées du fichier, l'index ordonné des slots de continuation,
+et les données du chunk 0 en ligne.
 
 ```json
 {
   "File": {
-    "kind": "file",
-    "total_size": 123456,
-    "next_slot": 99,
-    "data": "<octets binaires>"
+    "kind":        "file",
+    "total_size":  123456,
+    "data_slots":  [17, 23, 41, 58],
+    "index_chain": null,
+    "data":        "<chunk 0, ≤ 30 000 octets>"
   }
 }
 ```
 
-#### Fichier — continuation (`VaultNode::File`, kind=`"file_continuation"`)
+- `data_slots` : ids physiques des slots de continuation, dans l'ordre
+  (chunk 1 = `data_slots[0]`, chunk 2 = `data_slots[1]`, …).
+  Contient jusqu'à `MAX_DIRECT_SLOTS` entrées (fichiers ≤ ~120 Mo + 30 Ko).
+- `index_chain` : slot d'un `FileIndexBlock` si `data_slots` est saturé,
+  `null` sinon.
+- `data` : octets du chunk 0 en ligne (≤ `CHUNK_SIZE`).
+
+---
+
+#### Fichier — chunk de continuation (`VaultNode::FileData`, kind=`"file_data"`)
+
+Contient uniquement les données brutes d'un chunk (chunks 1, 2, …).
+Aucun pointeur — l'index est dans le slot tête.
 
 ```json
 {
-  "File": {
-    "kind": "file_continuation",
-    "total_size": 0,
-    "next_slot": null,
-    "data": "<octets binaires>"
+  "FileData": {
+    "kind": "file_data",
+    "data": "<chunk N, ≤ 30 000 octets>"
   }
 }
 ```
 
-Les fichiers sont stockés en **liste chaînée de slots** :
-`slot_0 → slot_1 → … → slot_N (next_slot=null)`.
-Capacité utile par slot : `SLOT_SIZE − 36 (VNMB) − 4 (préfixe len) = 32 728 octets`.
+---
+
+#### Fichier — index overflow (`VaultNode::FileIndex`, kind=`"file_index"`)
+
+Utilisé uniquement pour les fichiers dépassant `MAX_DIRECT_SLOTS + 1` chunks
+(≈ 120 Mo). Peut chaîner pour supporter des fichiers arbitrairement grands.
+
+```json
+{
+  "FileIndex": {
+    "kind":       "file_index",
+    "slot_ids":   [102, 107, 115, 122],
+    "next_index": null
+  }
+}
+```
+
+- `slot_ids` : ids des chunks suivants dans l'ordre (≤ `MAX_INDEX_SLOTS`).
+- `next_index` : slot du prochain `FileIndexBlock`, ou `null`.
+
+---
+
+#### Structure complète d'un fichier
+
+```
+Slot tête (VaultNode::File)
+  ├── data          → chunk 0 (inline, ≤ 30 KB)
+  ├── data_slots    → [slot_A, slot_B, …]  (chunks 1..MAX_DIRECT_SLOTS)
+  └── index_chain ──→ FileIndexBlock
+                         ├── slot_ids  → [slot_X, slot_Y, …] (chunks suivants)
+                         └── next_index ──→ FileIndexBlock → …
+
+Chaque slot_A / slot_X pointe vers un VaultNode::FileData
+  └── data → chunk N (≤ 30 KB)
+```
+
+Capacité par niveau d'index :
+
+| Niveau                       | Chunks supplémentaires | Taille fichier max cumulée |
+|------------------------------|----------------------:|---------------------------|
+| Inline dans tête (chunk 0)   |                     1 | 30 Ko                      |
+| `data_slots` dans tête       |             4 000     | ~120 Mo                    |
+| 1 `FileIndexBlock`           |             4 080     | ~242 Mo                    |
+| N `FileIndexBlock` chaînés   |        N × 4 080      | illimité                   |
+
+Accès aléatoire en O(1) : `chunk_index → data_slots[i]` ou
+O(profondeur de chaîne) ≤ O(2) pour les fichiers < 480 Mo.
 
 ---
 
@@ -441,8 +511,8 @@ l'aveugle pour préserver l'anonymat des destinataires.
      slot_key = Argon2id(password, salt=slot[0..32], profile=slot[32])
      K_master = AEAD_decrypt(slot_key, slot[33..101])
      Si succès → aller en 5
-4. Pour chaque key slot [0..num_key_slots) à offset (1832 + j×1676) :
-     Si fingerprint correspond → décapsuler → K_master
+4. Pour chaque key slot [0..num_key_slots) à offset (1832 + j×1668) :
+     Décapsuler (essai aveugle, pas de fingerprint) → K_master
      Si succès → aller en 5
 5. Déchiffrer le bloc VNMB [68..500] avec K_master
      → valider magic b"VNM1", lire outer_slots, root_slot
@@ -457,3 +527,51 @@ Pour le volume caché :
      → valider magic b"VNM1", lire outer_slots, hidden_start
 4. Slots du volume caché : [hidden_start .. hidden_start + outer_slots)
 ```
+
+---
+
+## 9. Sémantique d'écriture (driver FUSE)
+
+Cette section décrit le comportement observable lors d'une copie de fichier
+dans un conteneur monté. Elle ne fait pas partie du format binaire mais
+est nécessaire pour comprendre quand les données sont physiquement sur disque.
+
+### 9.1 Cycle de vie d'un fichier en écriture
+
+```
+Opération FUSE       Disque              RAM (cache)
+─────────────────────────────────────────────────────────────────
+create()             slot tête créé ✓    cache vide
+write(chunk 0)       —                   cache[0] = données, dirty
+write(chunk 1..N)    —                   cache[1..N] = données, dirty
+                                         ↑ tant que dirty_cont ≤ 128
+─────────────────────────────────────────────────────────────────
+seuil dépassé        chunks anciens      dirty count ≤ 128 chunks
+(write-through)      écrits sur disque ✓
+─────────────────────────────────────────────────────────────────
+close() / flush()    chunks dirty ✓      cache vidé
+                     slot tête mis
+                     à jour (index) ✓
+─────────────────────────────────────────────────────────────────
+```
+
+### 9.2 Garanties
+
+| Propriété | Valeur |
+|-----------|--------|
+| RAM max par fichier ouvert | `MAX_CACHE_CHUNKS × CHUNK_SIZE` ≈ **7,7 Mo** |
+| Seuil write-through | `WRITE_THROUGH_THRESHOLD` = **128 chunks** ≈ 3,8 Mo dirty |
+| Données visibles dans l'index | uniquement après `close()` (slot tête mis à jour) |
+| Perte en cas de crash avant `close()` | chunks écrits par write-through sont sur disque ; chunk 0 et l'index tête sont perdus |
+
+### 9.3 Atomicité
+
+Le slot tête (qui contient `total_size` et l'index `data_slots` complet) est
+écrit en dernier, lors du `flush()` final. Tant qu'il n'est pas mis à jour,
+le fichier apparaît avec son ancienne taille dans le répertoire parent.
+
+Les chunks de continuation écrits en write-through sont physiquement sur
+disque mais non référencés dans le slot tête — ils seront inclus dans
+l'index lors du prochain `flush()`. Un crash entre le write-through et le
+`flush()` final laisse des slots orphelins qui seront récupérés par un
+éventuel outil de réparation (`fsck`).
