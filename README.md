@@ -11,6 +11,8 @@ indistinguishable from encrypted data, enabling plausible deniability.
 ## Features
 
 - **AEAD encryption** — four cipher choices (see table below); one or three auth tags per 32 KB slot
+- **Per-slot key isolation** — each slot is encrypted with a key derived from `K_master` and its index (`BLAKE3("venom:slot:v1", K_master‖slot_index)`); compromising one slot's key does not expose K_master
+- **Global integrity** — BLAKE3 Merkle tree over all encrypted slots, verified at mount time; detects external modification or removal of any slot
 - **Password slot protection** — `K_master` in password slots is **always** wrapped with Triple encryption regardless of the container cipher
 - **Cipher anonymity** — cipher choice is never exposed in plaintext; discovered blindly via AEAD on open
 - **Memory-hard KDF** — Argon2id (interactive: 64 MiB / sensitive: 256 MiB)

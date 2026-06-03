@@ -20,6 +20,7 @@ venom/
 │   │   ├── container/   header v1, CipherAlgorithm (4 ciphers), KdfParams, recipient slots
 │   │   ├── crypto/      Argon2id KDF, XChaCha20 / Deoxys-II-256 / Serpent-256-EAX / Triple,
 │   │   │                hybrid_kem (X25519 + ML-KEM-1024), key file format
+│   │   ├── storage/     SlotStore (per-slot BLAKE3 key derivation, BLAKE3 Merkle tree),
 │   │   ├── storage/     SlotStore, VaultNode, DirectoryBlock, FileBlock
 │   │   └── fs/          VnmContainer API, FUSE (Unix), WinFSP (Windows)
 │   ├── tests/           41 integration tests
@@ -107,12 +108,12 @@ x25519_eph_sk = random()
 x25519_shared = X25519(x25519_eph_sk, recipient.x25519_pk)
 (mlkem_ct, mlkem_ss) = ML-KEM.Encaps(recipient.mlkem_ek)
 
-hybrid_key = SHA-256(
-    "venom:hybrid:v1"   ← domain separator
-    || x25519_shared    ← 32 bytes (ECDH result)
-    || mlkem_ss         ← 32 bytes (ML-KEM shared secret)
-    || x25519_eph_pk    ← 32 bytes (ciphertext binding)
-    || mlkem_ct         ← 1568 bytes (ciphertext binding)
+hybrid_key = BLAKE3_derive_key(
+    context  = "venom:hybrid:v1",
+    material = x25519_shared  (32 B)
+             || mlkem_ss      (32 B)
+             || x25519_eph_pk (32 B, ciphertext binding)
+             || mlkem_ct      (1568 B, ciphertext binding)
 )
 ```
 
@@ -123,7 +124,7 @@ If ML-KEM-1024 has a classical weakness → X25519 still holds.
 - [x] `hybrid_generate()` → `HybridPrivateKey { x25519_sk, x25519_pk, mlkem_seed, mlkem_ek }`
 - [x] `hybrid_encapsulate(pub)` → `(x25519_eph_pk, mlkem_ct, hybrid_key)`
 - [x] `hybrid_decapsulate(priv, x25519_eph_pk, mlkem_ct)` → `hybrid_key`
-- [x] `fingerprint` = `SHA-256(x25519_pk || mlkem_ek)[0..8]`
+- [x] `fingerprint` = `BLAKE3(x25519_pk || mlkem_ek)[0..8]`
 - [x] Password slots (up to 8) — independent Argon2id salt per slot, always Triple-encrypted
 - [x] Hybrid key slots (up to 8) — blind AEAD probing (all 4 ciphers) on open
 - [x] `VnmContainer::open(path, OpenCredential::Password(pw))`
@@ -188,12 +189,12 @@ container.read_node / write_node / update_node / free_node / flush
 - [x] Case-insensitive paths, FILETIME, drive-letter mount, `Mutex<Inner>`
 - [x] Requires WinFSP installed (https://winfsp.dev)
 
-### Tests — 41 total, all passing
+### Tests — 43 total, all passing
 
 | Suite | Count | Covers |
 |-------|------:|--------|
 | `crypto_tests` | 14 | XChaCha20 / Deoxys-II-256 / Serpent-256-EAX / Triple AEAD, wrong key, AAD binding, tamper, KDF, Triple container create/open |
-| `container_tests` | 16 | create/open (all 4 ciphers), wrong password, CRUD, persistence, hidden volume, hybrid KEM, add recipient, multiple recipients, key file passphrase, rollback detection |
+| `container_tests` | 18 | create/open (all 4 ciphers), wrong password, CRUD, persistence, hidden volume, hybrid KEM, add recipient, multiple recipients, key file passphrase, rollback detection, Merkle verification, Merkle tamper detection |
 | `fuse_cache_tests` (inline) | 11 | cache lifecycle, large-file chunk roundtrip, write-through, rename, unlink |
 
 ### GUI — Qt6/C++20
@@ -213,7 +214,7 @@ container.read_node / write_node / update_node / free_node / flush
 - [ ] **Recipient management requires password re-entry** — `K_master` is not kept
   in mount state; adding/removing recipients requires re-opening the container.
 - [ ] **Write atomicity** — crash during slot replacement can corrupt a file.
-- [ ] **Integrity manifest** — no global HMAC over the allocation bitmap.
+- [x] **Global integrity** — BLAKE3 Merkle tree over all encrypted slots; root in allocation block; verified at mount (detects external slot modification/removal)
 - [ ] **Volume size limit** — bitmap must fit in one slot (≈ 8 GB per volume).
 - [ ] **Password zeroization** — GUI password fields are plain `String`.
 - [ ] **Async create** — random-fill + KDF blocks the UI thread.

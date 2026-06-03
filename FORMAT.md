@@ -237,12 +237,12 @@ Dérivation de la clé de slot :
 ```
 x25519_shared = ECDH(x25519_eph_pk, x25519_sk_recipient)
 mlkem_ss      = ML-KEM-1024.Decapsulate(mlkem_seed, mlkem_ct)
-hybrid_key    = SHA-256(
-    b"venom:hybrid:v1"
-    ‖ x25519_shared    (32 B)
-    ‖ mlkem_ss         (32 B)
-    ‖ x25519_eph_pk    (32 B)
-    ‖ mlkem_ct         (1568 B)
+hybrid_key    = BLAKE3_derive_key(
+    context  = "venom:hybrid:v1",
+    material = x25519_shared (32 B)
+             ‖ mlkem_ss      (32 B)
+             ‖ x25519_eph_pk (32 B)
+             ‖ mlkem_ct      (1568 B)
 )
 Pour chaque cipher {XChaCha20-Poly1305, Deoxys-II-256, Serpent-256-EAX, Triple} :
   enc_len = vnmb_overhead(cipher) + 32
@@ -300,8 +300,15 @@ Offset  Taille  Type        Description
 ──────────────────────────────────────────────────────────────────────────
 ```
 
-AAD de chiffrement : `slot_index as u64 LE` (8 octets).
-Cela lie chaque slot à sa position physique (protection contre le déplacement).
+**Clé de chiffrement par slot** (isolation des clés) :
+```
+slot_key[32] = BLAKE3_derive_key("venom:slot:v1", K_master[32] ‖ slot_index_le8[8])
+```
+Chaque slot utilise une clé unique dérivée de `K_master` et de son index. Compromettre
+la clé d'un slot n'expose ni `K_master` ni les clés des autres slots.
+
+**AAD** : `slot_index as u64 LE` (8 octets) — deuxième couche de liaison au slot,
+indépendante de la dérivation de clé (protection contre le déplacement).
 
 Index des slots réservés :
 - Slot 0 : bloc d'allocation du volume extérieur (`OUTER_ALLOC_SLOT`)
@@ -457,7 +464,7 @@ Offset   Taille  Type        Description
 4          4     u32 LE      version = 1
 8          8     u64 LE      created_at (timestamp Unix)
 16        64     [u8; 64]    label UTF-8 null-paddé
-80         8     [u8; 8]     fingerprint = SHA-256(x25519_pk ‖ mlkem_ek)[0..8]
+80         8     [u8; 8]     fingerprint = BLAKE3(x25519_pk ‖ mlkem_ek)[0..8]
 88        32     [u8; 32]    x25519_pk — clé publique X25519
 120     1 568     [u8; 1568]  mlkem_ek — clé d'encapsulation ML-KEM-1024
 1 688      1     u8          protected = 0
@@ -498,7 +505,7 @@ Offset   Taille  Type        Description
 4          4     u32 LE      version = 1
 8          8     u64 LE      created_at (timestamp Unix)
 16        64     [u8; 64]    label UTF-8 null-paddé
-80         8     [u8; 8]     fingerprint = SHA-256(x25519_pk ‖ mlkem_ek)[0..8]
+80         8     [u8; 8]     fingerprint = BLAKE3(x25519_pk ‖ mlkem_ek)[0..8]
 88        32     [u8; 32]    x25519_pk
 120     1 568     [u8; 1568]  mlkem_ek
 ──────────────────────────────────────────────────────────────────────────
@@ -542,18 +549,18 @@ Le cipher Triple (ID=3) applique trois couches de chiffrement EAX successives.
 Chaque couche utilise un mode AEAD indépendant avec sa propre clé dérivée et son
 propre tag 16 B — trois authentifications indépendantes par bloc.
 
-**Clés dérivées de K_master via HMAC-SHA256 :**
+**Clés dérivées de K_master via BLAKE3 `derive_key()` :**
 
-| Couche | Algorithme       | Clé  | Nonce |
-|--------|-----------------|-----:|------:|
-| 1      | XChaCha20-Poly1305 | 32 B | 24 B |
-| 2      | Deoxys-II-256      | 32 B | 15 B |
-| 3      | Serpent-256-EAX    | 32 B | 16 B |
+| Couche | Algorithme         | Clé  | Nonce |
+|--------|--------------------|-----:|------:|
+| 1      | XChaCha20-Poly1305 | 32 B | 24 B  |
+| 2      | Deoxys-II-256      | 32 B | 15 B  |
+| 3      | Serpent-256-EAX    | 32 B | 16 B  |
 
 ```
-K1 = HMAC-SHA256(K_master, "\x01venom:triple:xchacha20") — 32 B
-K2 = HMAC-SHA256(K_master, "\x02venom:triple:deoxys")    — 32 B
-K3 = HMAC-SHA256(K_master, "\x03venom:triple:serpent")   — 32 B
+K1 = BLAKE3_derive_key("venom:triple:xchacha20", K_master) — 32 B
+K2 = BLAKE3_derive_key("venom:triple:deoxys",    K_master) — 32 B
+K3 = BLAKE3_derive_key("venom:triple:serpent",   K_master) — 32 B
 ```
 
 **VNMB Triple block layout :**
@@ -581,26 +588,59 @@ Tailles des composants :
 | ML-KEM-1024 seed   |    64 B | graine → régénère la paire complète     |
 | ML-KEM-1024 ek     | 1 568 B | clé d'encapsulation (publique)          |
 | ML-KEM-1024 ct     | 1 568 B | chiffré KEM                            |
-| shared secret      |    32 B | SHA-256 des deux secrets                |
+| shared secret      |    32 B | BLAKE3_derive_key des deux secrets      |
 
 Combinaison des secrets partagés :
 ```
-hybrid_key = SHA-256(
-    b"venom:hybrid:v1"      (16 B, séparateur de domaine)
-    ‖ x25519_shared         (32 B)
-    ‖ mlkem_ss              (32 B)
-    ‖ x25519_eph_pk         (32 B, lie le chiffré X25519)
-    ‖ mlkem_ct              (1568 B, lie le chiffré KEM)
+hybrid_key = BLAKE3_derive_key(
+    context  = "venom:hybrid:v1",        ← séparation de domaine au niveau de l'IV BLAKE3
+    material = x25519_shared  (32 B)
+             ‖ mlkem_ss       (32 B)
+             ‖ x25519_eph_pk  (32 B, lie le chiffré X25519)
+             ‖ mlkem_ct       (1568 B, lie le chiffré KEM)
 )
 ```
 
 Sécurité : le conteneur reste sécurisé si **l'un des deux** algorithmes
 tient (X25519 contre l'attaquant classique, ML-KEM-1024 contre le quantique).
 
-### 7.5 Fingerprint (fichiers de clés uniquement)
+### 7.5 Dérivation de clé par slot
+
+Chaque slot de données est chiffré avec une clé dérivée, pas directement avec `K_master` :
 
 ```
-fingerprint[8] = SHA-256(x25519_pk ‖ mlkem_ek)[0..8]
+slot_key[32] = BLAKE3_derive_key("venom:slot:v1", K_master[32] ‖ slot_index_le8[8])
+```
+
+**Propriétés :**
+- Isolation : la clé de chaque slot est unique — une faiblesse théorique au niveau
+  du cipher sur un slot n'expose ni `K_master` ni les autres slots
+- `slot_index` est aussi présent en AAD (deux couches de liaison indépendantes)
+- BLAKE3 à ~5 GB/s : overhead négligeable
+
+### 7.6 Arbre de Merkle BLAKE3
+
+Un arbre de Merkle sur les octets chiffrés bruts de tous les slots utilisés
+est calculé à la fermeture et vérifié à l'ouverture. Détecte toute modification
+ou suppression de slot entre deux montages, avant que le moindre fichier soit accessible.
+
+```
+leaf[i] = BLAKE3_derive_key("venom:merkle:leaf:v1",
+              slot_index_le8[8] ‖ raw_slot_32kb[32768])
+
+node     = BLAKE3_derive_key("venom:merkle:node:v1", left[32] ‖ right[32])
+```
+
+Arbre binaire bottom-up ; un nœud impair à chaque niveau est propagé inchangé.
+La **racine** est stockée dans le bloc d'allocation (aux côtés de la bitmap et du
+compteur de génération), chiffrée avec `slot_key(alloc_slot)`.
+
+Racine nulle `[0;32]` → pas encore calculée (bootstrap au premier `flush()`).
+
+### 7.7 Fingerprint (fichiers de clés uniquement)
+
+```
+fingerprint[8] = BLAKE3(x25519_pk ‖ mlkem_ek)[0..8]
 ```
 
 Le fingerprint est stocké dans les fichiers `.key` et `.pub` pour l'interface
@@ -632,10 +672,19 @@ l'aveugle pour préserver l'anonymat des destinataires.
 3. Déchiffrer le header avec K_master :
    Pour chaque copie d'en-tête {[0..512], [EOF-512..EOF], [EOF-1024..EOF-512]} :
      Pour chaque cipher {XChaCha20, DeoxysII, Serpent-EAX, Triple} :
-       body = AEAD_decrypt(K_master, cipher, aad, header[68..])
-       Si succès et magic=b"VNM1" → cipher du conteneur découvert, accès aux slots
+       body = AEAD_decrypt(slot_key(alloc_slot), cipher, aad, header[68..])
+       Si succès et magic=b"VNM1" → cipher du conteneur découvert
 
-4. Accéder aux slots via DATA_AREA_OFFSET + slot_index × SLOT_SIZE
+4. Charger le bloc d'allocation (slot 0) :
+   Déchiffrer avec slot_key(0) → bitmap + génération + merkle_root_stored
+   Si merkle_root_stored ≠ [0;32] :
+     Pour chaque slot utilisé (d'après bitmap) :
+       leaf = BLAKE3_derive_key("venom:merkle:leaf:v1", slot_index_le8 || raw_slot_32kb)
+     Calculer la racine Merkle → comparer avec merkle_root_stored
+     Si mismatch → MerkleIntegrityFailure (un slot a été modifié ou supprimé)
+
+5. Accéder aux slots via DATA_AREA_OFFSET + slot_index × SLOT_SIZE
+   Chaque lecture : déchiffrer avec slot_key(slot_index)
 ```
 
 Pour le volume caché :

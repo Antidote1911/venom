@@ -37,10 +37,11 @@ to `master`. There are no backport branches.
 | Default cipher | XChaCha20-Poly1305 — 192-bit random nonce (birthday bound 2⁹⁶) |
 | Alt cipher — Deoxys-II-256 | 120-bit random nonce (birthday bound 2⁶⁰); CAESAR "defense in depth" finalist |
 | Alt cipher — Serpent-256-EAX | 128-bit random nonce; EAX = CTR + OMAC (Serpent-based MAC, no external primitive) |
-| Triple cipher | XChaCha20-Poly1305 + Deoxys-II-256 + Serpent-256-EAX — 111 B overhead per slot; three 256-bit subkeys, each layer authenticated independently |
+| Triple cipher | XChaCha20-Poly1305 + Deoxys-II-256 + Serpent-256-EAX — 111 B overhead per slot; three 256-bit subkeys via BLAKE3 `derive_key()`, each layer authenticated independently |
 | Password slot protection | **Always Triple** — `K_master` in password slots is wrapped with Triple regardless of the container's data cipher |
-| Integrity | 128-bit AEAD tag per slot (or 64 B for Triple) |
-| AAD | `slot_index as u64 LE` — binds ciphertext to physical location |
+| Per-slot key isolation | `slot_key = BLAKE3_derive_key("venom:slot:v1", K_master‖slot_index)` — cipher-level compromise of one slot does not expose K_master or other slot keys |
+| Slot integrity | 128-bit AEAD tag per slot (or 48 B for Triple); slot_index in both derived key and AAD (two independent binding layers) |
+| Global integrity | BLAKE3 Merkle tree over all encrypted slots; root stored in allocation block; verified at mount time — detects external slot modification or removal |
 | Cipher anonymity | Byte 64 of the header is always `0`; the real cipher is discovered blindly via AEAD probing (all 4 ciphers tried) during open. An observer without the password cannot determine which cipher a container uses. |
 
 Every slot is independently authenticated. Bit-flip attacks and slot-swap
@@ -126,8 +127,7 @@ returned to the free list. Deleted files leave no recoverable ciphertext.
 | `ml-kem 0.3` | ML-KEM-1024 (FIPS 203) | RustCrypto, kept up to date |
 | `x25519-dalek 2` | X25519 ECDH | kept up to date |
 | `argon2 0.5` | Argon2id (RFC 9106) | RustCrypto, kept up to date |
-| `sha2 0.10` | SHA-256 (hybrid KEM combiner + subkey derivation) | RustCrypto, kept up to date |
-| `hmac 0.12` | HMAC-SHA256 (Triple subkey derivation only — no longer used as MAC) | RustCrypto, kept up to date |
+| `blake3 1` | BLAKE3 — hashing, `derive_key()` (Triple subkeys, KEM combiner, per-slot keys), Merkle tree, fingerprints | kept up to date |
 | `zeroize` | Memory zeroing on drop | RustCrypto, kept up to date |
 | `libc` | `mlock(2)` / `munlock(2)` | Unix only, for K_master swap protection |
 
