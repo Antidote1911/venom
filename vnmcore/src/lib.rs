@@ -4,6 +4,7 @@ pub mod storage;
 pub mod fs;
 pub mod error;
 pub mod rollback;
+pub mod locked_memory;
 
 pub use container::{CipherAlgorithm, KdfParams};
 pub use fs::container::{VnmContainer, OpenCredential, RecipientInfo, HiddenVolumeOptions};

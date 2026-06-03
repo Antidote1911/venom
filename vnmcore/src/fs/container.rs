@@ -22,7 +22,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write, Seek, SeekFrom};
 
 use rand::RngCore;
-use zeroize::Zeroizing;
+use crate::locked_memory::LockedMemory;
 
 use crate::{Result, VnmError};
 use crate::rollback::RollbackState;
@@ -77,7 +77,7 @@ pub struct VnmContainer {
     pub outer_limit: u64,   // = outer_slots for outer vol; = hidden_start for hidden vol
     pub label:       Option<String>,
     pub created_at:  u64,
-    k_master:        Zeroizing<[u8; 32]>,
+    k_master:        LockedMemory<[u8; 32]>,
     path:            PathBuf,
     /// Anti-rollback identifier (all-zeros for pre-rollback containers).
     pub container_id: [u8; 16],
@@ -285,7 +285,7 @@ impl VnmContainer {
             outer_limit:  outer_slots,
             label,
             created_at:   now,
-            k_master:     Zeroizing::new(k_outer),
+            k_master:     LockedMemory::new(k_outer),
             path:         path.to_path_buf(),
             container_id: outer_container_id,
         })
@@ -349,7 +349,7 @@ impl VnmContainer {
                             outer_limit:  meta.outer_slots,
                             label:        label_from(meta.label),
                             created_at:   meta.created_at,
-                            k_master:     Zeroizing::new(k),
+                            k_master:     LockedMemory::new(k),
                             store,
                             path:         path.to_path_buf(),
                             container_id: meta.container_id,
@@ -384,7 +384,7 @@ impl VnmContainer {
                     outer_limit:  hid_start,
                     label:        label_from(meta.label),
                     created_at:   meta.created_at,
-                    k_master:     Zeroizing::new(k),
+                    k_master:     LockedMemory::new(k),
                     store,
                     path:         path.to_path_buf(),
                     container_id: meta.container_id,

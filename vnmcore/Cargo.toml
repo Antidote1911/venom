@@ -6,7 +6,7 @@ description = "Core library for Venom cryptographic containers"
 
 [features]
 default = ["fuse"]
-fuse    = ["dep:fuser", "dep:libc"]
+fuse    = ["dep:fuser"]
 
 [dependencies]
 aes-gcm           = { workspace = true }
@@ -28,9 +28,11 @@ sha2              = { workspace = true }
 hmac              = { workspace = true }
 serde_bytes       = { workspace = true }
 
-# Unix: FUSE
+# Unix: mlock (key memory protection) + FUSE
 fuser = { workspace = true, optional = true }
-libc  = { version = "0.2", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Windows: WinFSP
 [target.'cfg(target_os = "windows")'.dependencies]
