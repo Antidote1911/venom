@@ -344,13 +344,26 @@ void MainWindow::refreshMountKeyList()
                 makeSeparatorItem(QStringLiteral("── USB: ") + drive + QStringLiteral(" ──")));
             hasUsb = true;
         }
-        QString label = QFileInfo(path).fileName();
-        // Try to read the key label from file metadata
-        if (auto* kInfo = new QListWidgetItem(label + QStringLiteral("  [USB]"))) {
-            kInfo->setData(Qt::UserRole, path);
-            kInfo->setForeground(QColor(QStringLiteral("#2980b9")));
-            ui->listMountKeys->addItem(kInfo);
+
+        // Read label and fingerprint from the key file
+        VnmKeyInfo info{};
+        QString displayText;
+        if (vnm_key_read_info(path.toUtf8().constData(), &info)) {
+            const QString label = QString::fromUtf8(
+                reinterpret_cast<const char*>(info.label));
+            const QString fp = QString::fromLatin1(
+                reinterpret_cast<const char*>(info.fingerprint));
+            displayText = (label.isEmpty() ? QFileInfo(path).baseName() : label)
+                        + QStringLiteral("  —  ") + fp;
+        } else {
+            displayText = QFileInfo(path).fileName(); // fallback: filename only
         }
+
+        auto* item = new QListWidgetItem(displayText);
+        item->setData(Qt::UserRole, path);
+        item->setToolTip(path);
+        item->setForeground(QColor(QStringLiteral("#2980b9")));
+        ui->listMountKeys->addItem(item);
     }
 
     // Show hint when no USB keys detected
