@@ -22,6 +22,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write, Seek, SeekFrom};
 
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 use crate::{Result, VnmError};
 use crate::container::{
@@ -75,7 +76,7 @@ pub struct VnmContainer {
     pub outer_limit: u64,   // = outer_slots for outer vol; = hidden_start for hidden vol
     pub label:       Option<String>,
     pub created_at:  u64,
-    k_master:        [u8; 32], // kept for add/remove_recipient
+    k_master:        Zeroizing<[u8; 32]>,
     path:            PathBuf,
 }
 
@@ -272,7 +273,7 @@ impl VnmContainer {
             outer_limit: outer_slots,
             label,
             created_at:  now,
-            k_master:    k_outer,
+            k_master:    Zeroizing::new(k_outer),
             path:        path.to_path_buf(),
         })
     }
@@ -330,7 +331,7 @@ impl VnmContainer {
                             outer_limit: meta.outer_slots,
                             label:       label_from(meta.label),
                             created_at:  meta.created_at,
-                            k_master:    k,
+                            k_master:    Zeroizing::new(k),
                             store,
                             path:        path.to_path_buf(),
                         });
@@ -359,7 +360,7 @@ impl VnmContainer {
                     outer_limit: hid_start,
                     label:       label_from(meta.label),
                     created_at:  meta.created_at,
-                    k_master:    k,
+                    k_master:    Zeroizing::new(k),
                     store,
                     path:        path.to_path_buf(),
                 });

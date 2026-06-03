@@ -15,6 +15,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
 
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 use crate::{Result, VnmError};
 use crate::container::{CipherAlgorithm, DATA_AREA_OFFSET, SLOT_SIZE};
@@ -26,7 +27,7 @@ pub const SLOT_PAYLOAD_CAPACITY: usize = SLOT_SIZE - 36;
 
 pub struct SlotStore {
     file:        Mutex<std::fs::File>,
-    master_key:  [u8; 32],
+    master_key:  Zeroizing<[u8; 32]>,
     cipher:      CipherAlgorithm,
     /// Inclusive lower bound of this volume's slots (0 for outer, outer_limit for hidden).
     pub slot_start: u64,
@@ -49,7 +50,7 @@ impl SlotStore {
     ) -> Self {
         Self {
             file: Mutex::new(file),
-            master_key,
+            master_key: Zeroizing::new(master_key),
             cipher,
             slot_start,
             slot_limit,
