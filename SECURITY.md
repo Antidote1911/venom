@@ -85,6 +85,20 @@ parameters are not exposed.
   - Post-quantum security: resistant to Shor's algorithm as long as
     ML-KEM-1024 holds; falls back to X25519 security if ML-KEM is broken.
 
+### USB Key Workflow
+
+Private key material can be kept exclusively on a USB drive, never written to the host machine:
+
+- **Generate to USB**: the Key Manager saves `<fingerprint>.key` directly to `<usb>/venom/`
+  via `vnm_key_generate_to_dir()` — `~/.config/venom/keys/` is never touched.
+- **Mount from USB**: the GUI detects `.key` files on removable volumes via `QStorageInfo`
+  and reads them in-place. The path is passed directly to the decryption routine; no copy
+  is made on the host disk.
+- **Air-gap use case**: take the container to a work machine, insert USB, decrypt, eject —
+  no key material ever persists on the work machine.
+- **Combined protection**: pair USB key with a passphrase on the `.key` file for two-factor
+  security (something you have + something you know).
+
 ### Plausible Deniability
 
 - The entire file is filled with cryptographically random bytes at creation.

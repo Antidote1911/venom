@@ -199,11 +199,34 @@ container.read_node / write_node / update_node / free_node / flush
 
 ### GUI — Qt6/C++20
 
-- [x] Create container: path, size, **4 cipher choices** (XChaCha20-Poly1305 / Deoxys-II-256 / Serpent-256-EAX / Triple), KDF profile, label, key recipients
-- [x] Mount with password or private key (`.key` file + passphrase)
-- [x] Unmount; vault cards showing cipher name, creation date, label
-- [x] Key Manager: generate, import, export `.pub`, passphrase protection
-- [x] Add/remove recipients on open container
+#### Vaults tab
+- [x] **Unified vault list** — single list showing all containers from `~/Documents/venom/`:
+  - Mounted: label, filename, size, cipher, date, `[Open folder]` `[Unmount]` — status `● Mounted` (green)
+  - Unmounted: filename, size, `[Mount]` button (pre-fills vault path) — status `○ Not mounted` (grey)
+  - Auto-refreshes on mount/unmount/create/tab switch
+
+#### Create tab
+- [x] Path auto-filled from label: `~/Documents/venom/<label>.vnm` (live update)
+- [x] `[Save as…]` overrides auto-fill; resets to auto after creation
+- [x] Parent directory created automatically on create
+- [x] `⚠ Key-only container` warning shown when password empty + key recipient selected
+- [x] Key recipients: accepts `.key` and `.pub` files; container file cleaned up on recipient error
+
+#### Mount tab
+- [x] Mountpoint auto-filled from vault filename: `~/mnt/venom/<stem>/`
+- [x] Mountpoint directory created automatically
+- [x] Key list split into two sections: `── Local keys ──` and `── USB: <name> ──`
+- [x] **USB keys** detected via `QStorageInfo` on all non-system volumes; `<usb>/venom/*.key` scanned
+- [x] `[Refresh USB]` button + `"Insert your Venom USB key and click Refresh"` hint
+- [x] USB keys used directly from their path — never copied to local key store
+- [x] Public-only `.pub` keys hidden from mount list (can't decrypt)
+- [x] Clicking a key in the list is sufficient to mount (no path field to fill manually)
+
+#### Key Manager
+- [x] **`Save to:` combo** — local store or any detected USB drive (`venom/` subfolder)
+- [x] Generating to USB: key saved to `<usb>/venom/<fingerprint>.key`, never to `~/.config/venom/keys/`
+- [x] Import dialog shows `*.key *.pub` by default
+- [x] Generate auto-saves to `~/.config/venom/keys/<fingerprint>.key`
 
 ---
 
@@ -223,8 +246,9 @@ container.read_node / write_node / update_node / free_node / flush
 
 - [ ] Progress bar during container creation
 - [ ] Outer safe-fill warning for hidden volumes
-- [ ] Vault browser panel, tray icon, auto-unmount on idle
+- [ ] Tray icon, auto-unmount on idle
 - [ ] CLI mode (`venom mount <file.vnm> <mp> --password-stdin`)
+- [ ] USB key: show key label/fingerprint in mount list (currently shows filename only)
 
 ### FUSE / WinFSP
 

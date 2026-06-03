@@ -24,7 +24,8 @@ indistinguishable from encrypted data, enabling plausible deniability.
 - **Forward secrecy** — freed slots are immediately overwritten with random bytes
 - **K_master in locked memory** — master key generated and decrypted directly into `mlock`'d heap pages, never written to swap
 - **FUSE mount** — containers mount as a regular directory on Linux
-- **Qt6 GUI** — create, mount, unmount, manage recipients
+- **Qt6 GUI** — unified vault list, auto-fill paths, USB key support (generate/mount without writing to disk)
+- **USB key workflow** — generate directly to a USB drive; mount using a key on USB without ever copying it to the host machine
 
 ### Cipher algorithms
 
@@ -178,7 +179,7 @@ chunks in memory per open file regardless of file size.
 
 ## Key files
 
-Venom uses hybrid keypairs stored in `~/.config/venom/keys/`.
+Venom uses hybrid keypairs stored in `~/.config/venom/keys/` **or directly on a USB drive**.
 
 | Extension | Content |
 |-----------|---------|
@@ -186,6 +187,10 @@ Venom uses hybrid keypairs stored in `~/.config/venom/keys/`.
 | `.pub` | Public portion only — safe to share with container owners |
 
 Share your `.pub` file with anyone who should be able to open your containers.
+
+**USB key workflow:** generate a keypair directly onto a USB drive (`<usb>/venom/<fingerprint>.key`).
+At mount time, the GUI auto-detects removable media and lists USB keys separately — the key is
+read directly from the USB and never copied to the host machine's disk.
 
 ---
 
