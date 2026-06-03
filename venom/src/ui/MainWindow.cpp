@@ -15,6 +15,7 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QDir>
+#include <QStandardPaths>
 
 namespace Venom {
 
@@ -66,6 +67,23 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui->actionKeyManager, &QAction::triggered, this, [this]{ ui->tabWidget->setCurrentIndex(2); });
 
     // ── Tab 2 — Create container ──────────────────────────────────────────────
+    // Default containers directory: ~/Documents/venom/ (or ~/ as fallback)
+    {
+        QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+        if (docs.isEmpty()) docs = QDir::homePath();
+        const QString defaultDir = docs + QStringLiteral("/venom/");
+        ui->lePath->setText(defaultDir + QStringLiteral("vault.vnm"));
+
+        // Live-update the path when the label changes (until user picks a custom path)
+        connect(ui->leLabel, &QLineEdit::textChanged, this, [this, defaultDir](const QString& text) {
+            if (m_containerPathManual) return;
+            QString name = text.trimmed();
+            for (QChar& c : name)
+                if (!c.isLetterOrNumber() && c != '-') c = '_';
+            if (name.isEmpty()) name = QStringLiteral("vault");
+            ui->lePath->setText(defaultDir + name + QStringLiteral(".vnm"));
+        });
+    }
     connect(ui->btnBrowseCreate, &QPushButton::clicked, this, &MainWindow::browseCreatePath);
     connect(ui->btnCreateContainer, &QPushButton::clicked, this, &MainWindow::onCreateContainer);
 
@@ -233,15 +251,20 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 void MainWindow::browseCreatePath()
 {
     const QString p = QFileDialog::getSaveFileName(
-        this, tr("Container file"), {}, tr("Venom container (*.vnm)"));
-    if (!p.isEmpty())
+        this, tr("Container file"), ui->lePath->text(), tr("Venom container (*.vnm)"));
+    if (!p.isEmpty()) {
         ui->lePath->setText(p.endsWith(QLatin1String(".vnm")) ? p : p + QLatin1String(".vnm"));
+        m_containerPathManual = true;
+    }
 }
 
 void MainWindow::onCreateContainer()
 {
     const QString path = ui->lePath->text().trimmed();
     if (path.isEmpty()) { QMessageBox::warning(this, {}, tr("Enter a container path.")); return; }
+
+    // Ensure parent directory exists
+    QDir().mkpath(QFileInfo(path).absolutePath());
 
     const QString pw  = ui->lePassword->text();
     const QString pw2 = ui->leConfirm->text();
@@ -412,9 +435,9 @@ void MainWindow::onMountError(const QString&, const QString& error)
 void MainWindow::onContainerCreated(const QString& path)
 {
     statusBar()->showMessage(QStringLiteral("Container created: ") + path, 5000);
-    // Clear create form
-    ui->lePath->clear();
-    ui->leLabel->clear();
+    // Clear create form and reset path to auto-mode for next container
+    m_containerPathManual = false;
+    ui->leLabel->clear();  // triggers textChanged → resets lePath to default
     ui->lePassword->clear();
     ui->leConfirm->clear();
     ui->sbSize->setValue(100);

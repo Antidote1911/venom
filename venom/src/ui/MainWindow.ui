@@ -362,7 +362,7 @@
              <item>
               <widget class="QLineEdit" name="lePath">
                <property name="placeholderText">
-                <string>/home/user/secrets.vnm</string>
+                <string>Auto-filled from label — or use Save as…</string>
                </property>
               </widget>
              </item>
