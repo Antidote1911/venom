@@ -55,7 +55,8 @@ private:
     VenomCore*       m_core;
     QVBoxLayout*     m_vaultLayout;
     QList<KeyEntry>  m_keys;
-    bool             m_containerPathManual = false; ///< true once user picks a custom path
+    bool             m_containerPathManual  = false; ///< true once user picks a custom container path
+    bool             m_mountpointManual     = false; ///< true once user picks a custom mountpoint
 };
 
 } // namespace Venom

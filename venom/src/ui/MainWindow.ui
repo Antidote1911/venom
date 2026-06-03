@@ -162,7 +162,7 @@
              <item>
               <widget class="QLineEdit" name="leMountpoint">
                <property name="placeholderText">
-                <string>/mnt/vault  (empty directory)</string>
+                <string>Auto-filled from container name — or use Folder…</string>
                </property>
               </widget>
              </item>

@@ -99,6 +99,15 @@ MainWindow::MainWindow(QWidget* parent)
     // ── Tab 2 — Mount container ───────────────────────────────────────────────
     connect(ui->btnBrowseVault,      &QPushButton::clicked, this, &MainWindow::browseVaultPath);
     connect(ui->btnBrowseMountpoint, &QPushButton::clicked, this, &MainWindow::browseMountpoint);
+
+    // Auto-fill mountpoint from vault filename when not manually overridden
+    connect(ui->leVaultPath, &QLineEdit::textChanged, this, [this](const QString& vaultPath) {
+        if (m_mountpointManual) return;
+        const QString stem = QFileInfo(vaultPath.trimmed()).completeBaseName();
+        if (stem.isEmpty()) return;
+        const QString base = QDir::homePath() + QStringLiteral("/mnt/venom/");
+        ui->leMountpoint->setText(base + stem);
+    });
     connect(ui->btnBrowseKey,        &QPushButton::clicked, this, &MainWindow::browseKeyFile);
     connect(ui->btnMount,            &QPushButton::clicked, this, &MainWindow::onMount);
 
@@ -307,7 +316,10 @@ void MainWindow::browseVaultPath()
 void MainWindow::browseMountpoint()
 {
     const QString p = QFileDialog::getExistingDirectory(this, tr("Select mountpoint"));
-    if (!p.isEmpty()) ui->leMountpoint->setText(p);
+    if (!p.isEmpty()) {
+        ui->leMountpoint->setText(p);
+        m_mountpointManual = true;
+    }
 }
 
 void MainWindow::browseKeyFile()
@@ -323,6 +335,9 @@ void MainWindow::onMount()
     const QString mp    = ui->leMountpoint->text().trimmed();
     if (vault.isEmpty()) { QMessageBox::warning(this, {}, tr("Enter the container path.")); return; }
     if (mp.isEmpty())    { QMessageBox::warning(this, {}, tr("Enter a mountpoint directory.")); return; }
+
+    // Create mountpoint directory if it doesn't exist yet
+    QDir().mkpath(mp);
 
     if (ui->rbMountPassword->isChecked()) {
         m_core->mountWithPassword(vault, mp, ui->leMountPassword->text());
@@ -443,6 +458,10 @@ void MainWindow::onMountGone(const QString& mp)
 {
     removeVaultCard(mp);
     statusBar()->showMessage(QStringLiteral("Unmounted: ") + mp, 4000);
+    // Reset mount form fields so the next vault auto-fills the mountpoint
+    m_mountpointManual = false;
+    ui->leVaultPath->clear();
+    ui->leMountpoint->clear();
 }
 
 void MainWindow::onMountError(const QString&, const QString& error)
