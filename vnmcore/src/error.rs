@@ -43,4 +43,7 @@ pub enum VnmError {
 
     #[error("Requested size is too small (minimum {0} bytes)")]
     SizeTooSmall(u64),
+
+    #[error("Rollback detected: container generation {current_gen} < last known {expected_gen} — the container may have been replaced with an older copy")]
+    RollbackDetected { current_gen: u64, expected_gen: u64 },
 }

@@ -3,6 +3,7 @@ use vnmcore::fs::container::{VnmContainer, HiddenVolumeOptions, OpenCredential};
 use vnmcore::storage::{VaultNode, NodeKind};
 use vnmcore::storage::vault_fs::FileBlock;
 use vnmcore::hybrid_generate;
+use vnmcore::error::VnmError;
 
 const MB: u64 = 1024 * 1024;
 
@@ -42,6 +43,64 @@ fn wrong_password_rejected() {
     VnmContainer::create(&path, b"correct", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
         "interactive", None, None).unwrap();
     assert!(VnmContainer::open(&path, OpenCredential::Password(b"wrong")).is_err());
+    std::fs::remove_file(&path).ok();
+}
+
+// ── Anti-rollback ─────────────────────────────────────────────────────────────
+
+#[test]
+fn rollback_detected_after_container_replaced() {
+    let path = tmp("rollback");
+    let _ = std::fs::remove_file(&path);
+
+    // Create and mount the container (flush establishes generation baseline)
+    let c = VnmContainer::create(&path, b"pw", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
+        "interactive", None, None).unwrap();
+    c.flush().unwrap(); // generation = 1, stored in rollback state
+    let snapshot = std::fs::read(&path).unwrap(); // snapshot at generation 1
+    c.flush().unwrap(); // generation = 2
+    c.flush().unwrap(); // generation = 3
+    drop(c);
+
+    // "Attacker" replaces the container with the old snapshot (generation = 1)
+    std::fs::write(&path, &snapshot).unwrap();
+
+    // Re-opening must fail with RollbackDetected
+    // create() calls save_free_list() → gen=1; each flush() increments again.
+    // snapshot is taken after first flush() → gen=2.
+    // Two more flush() calls → gen=4 (last baseline).
+    // After restore: current_gen=2 < expected_gen=4.
+    match VnmContainer::open(&path, OpenCredential::Password(b"pw")) {
+        Err(VnmError::RollbackDetected { current_gen: 2, expected_gen: 4 }) => {}
+        Err(e) => panic!("expected RollbackDetected(2, 4), got: {e}"),
+        Ok(_)  => panic!("open should have failed with rollback error"),
+    }
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn reset_rollback_allows_deliberate_restore() {
+    let path = tmp("rollback_reset");
+    let _ = std::fs::remove_file(&path);
+
+    let c = VnmContainer::create(&path, b"pw", 4*MB, CipherAlgorithm::ChaCha20Poly1305,
+        "interactive", None, None).unwrap();
+    c.flush().unwrap();
+    let snapshot = std::fs::read(&path).unwrap();
+    c.flush().unwrap();
+    c.flush().unwrap();
+
+    // Reset the rollback baseline (simulates "I know this is a restore")
+    c.reset_rollback_state().unwrap();
+    drop(c);
+
+    // Restore to old snapshot
+    std::fs::write(&path, &snapshot).unwrap();
+
+    // Should open successfully after reset
+    assert!(VnmContainer::open(&path, OpenCredential::Password(b"pw")).is_ok());
+
     std::fs::remove_file(&path).ok();
 }
 

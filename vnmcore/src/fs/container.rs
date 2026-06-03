@@ -25,6 +25,7 @@ use rand::RngCore;
 use zeroize::Zeroizing;
 
 use crate::{Result, VnmError};
+use crate::rollback::RollbackState;
 use crate::container::{
     CipherAlgorithm,
     HEADER_REGION_SIZE, SLOT_SIZE, DATA_AREA_OFFSET,
@@ -78,6 +79,8 @@ pub struct VnmContainer {
     pub created_at:  u64,
     k_master:        Zeroizing<[u8; 32]>,
     path:            PathBuf,
+    /// Anti-rollback identifier (all-zeros for pre-rollback containers).
+    pub container_id: [u8; 16],
 }
 
 impl VnmContainer {
@@ -138,9 +141,11 @@ impl VnmContainer {
             }
         }
 
-        let now     = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        let k_outer = new_k_master();
-        let kdf_id  = if kdf_profile == "sensitive" { 1u8 } else { 0u8 };
+        let now          = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let k_outer      = new_k_master();
+        let kdf_id       = if kdf_profile == "sensitive" { 1u8 } else { 0u8 };
+        let mut outer_container_id = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut outer_container_id);
 
         // 2. Write hidden header at end (if requested)
         if let Some(ref h) = hidden {
@@ -151,6 +156,8 @@ impl VnmContainer {
             if let Some(ref s) = h.label {
                 let b = s.as_bytes(); hid_lbl[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
             }
+            let mut hid_container_id = [0u8; 16];
+            rand::thread_rng().fill_bytes(&mut hid_container_id);
 
             // Password slot for hidden volume
             let pw_slot = encode_password_slot(&k_hidden, h.password, hid_kdf_id, cipher)?;
@@ -160,6 +167,7 @@ impl VnmContainer {
                 num_password_slots: 1, num_key_slots: 0,
                 outer_slots: hidden_slots, hidden_start: hid_start,
                 root_slot: hid_start + 1, created_at: now, label: hid_lbl,
+                container_id: hid_container_id,
             };
             let hid_hdr = encode_header(&hid_payload, &k_hidden, true)?;
             write_bytes_at(path, file_size - 512, &hid_hdr)?;
@@ -222,7 +230,7 @@ impl VnmContainer {
 
             // Init hidden slot store (hidden volume has its own alloc in its first slot)
             let hid_alloc = hid_start + hidden_slots - 1;
-            let hid_store = open_store(path, k_hidden, cipher, hid_start, hid_start + hidden_slots, hid_alloc)?;
+            let hid_store = open_store(path, k_hidden, cipher, hid_start, hid_start + hidden_slots, hid_alloc, true)?;
             hid_store.rebuild_free_list();
             { hid_store.free.lock().unwrap().retain(|&s| s != hid_start + 1); }
             write_empty_dir(&hid_store, hid_start + 1)?;
@@ -241,6 +249,7 @@ impl VnmContainer {
             num_password_slots: u8::from(has_password), num_key_slots: 0,
             outer_slots, hidden_start: 0,
             root_slot: OUTER_ROOT_SLOT, created_at: now, label: lbl,
+            container_id: outer_container_id,
         };
         let outer_hdr = encode_header(&outer_payload, &k_outer, false)?;
         write_bytes_at(path, 0, &outer_hdr)?;   // outer primary  (offset 0)
@@ -258,23 +267,27 @@ impl VnmContainer {
         // Remaining slots stay as random bytes (already filled in step 1)
 
         // 5. Init outer slot store
-        let outer_store = open_store(path, k_outer, cipher, 0, outer_slots, OUTER_ALLOC_SLOT)?;
+        let outer_store = open_store(path, k_outer, cipher, 0, outer_slots, OUTER_ALLOC_SLOT, true)?;
         outer_store.rebuild_free_list();
         { outer_store.free.lock().unwrap().retain(|&s| s != OUTER_ROOT_SLOT); }
         write_empty_dir(&outer_store, OUTER_ROOT_SLOT)?;
         outer_store.save_free_list()?;
 
+        // Establish rollback baseline for new container (generation = 0 after first save_free_list)
+        RollbackState::load().update(&outer_container_id, outer_store.current_generation())?;
+
         Ok(VnmContainer {
-            store:       outer_store,
-            root_slot:   OUTER_ROOT_SLOT,
-            is_hidden:   false,
+            store:        outer_store,
+            root_slot:    OUTER_ROOT_SLOT,
+            is_hidden:    false,
             cipher,
             outer_slots,
-            outer_limit: outer_slots,
+            outer_limit:  outer_slots,
             label,
-            created_at:  now,
-            k_master:    Zeroizing::new(k_outer),
-            path:        path.to_path_buf(),
+            created_at:   now,
+            k_master:     Zeroizing::new(k_outer),
+            path:         path.to_path_buf(),
+            container_id: outer_container_id,
         })
     }
 
@@ -321,19 +334,25 @@ impl VnmContainer {
             for &off in &offsets {
                 if let Ok(raw) = read_512_at(path, off) {
                     if let Ok(meta) = decode_header(&raw, &k, false) {
-                        let store = open_store(path, k, meta.cipher, 0, meta.outer_slots, OUTER_ALLOC_SLOT)?;
+                        let has_gen = meta.container_id != [0u8; 16];
+                        let store = open_store(path, k, meta.cipher, 0, meta.outer_slots, OUTER_ALLOC_SLOT, has_gen)?;
                         store.load_free_list()?;
+                        // Anti-rollback check
+                        if has_gen {
+                            RollbackState::load().check(&meta.container_id, store.current_generation())?;
+                        }
                         return Ok(VnmContainer {
-                            root_slot:   meta.root_slot,
-                            is_hidden:   false,
-                            cipher:      meta.cipher,
-                            outer_slots: meta.outer_slots,
-                            outer_limit: meta.outer_slots,
-                            label:       label_from(meta.label),
-                            created_at:  meta.created_at,
-                            k_master:    Zeroizing::new(k),
+                            root_slot:    meta.root_slot,
+                            is_hidden:    false,
+                            cipher:       meta.cipher,
+                            outer_slots:  meta.outer_slots,
+                            outer_limit:  meta.outer_slots,
+                            label:        label_from(meta.label),
+                            created_at:   meta.created_at,
+                            k_master:     Zeroizing::new(k),
                             store,
-                            path:        path.to_path_buf(),
+                            path:         path.to_path_buf(),
+                            container_id: meta.container_id,
                         });
                     }
                 }
@@ -350,19 +369,25 @@ impl VnmContainer {
                 let hid_start = meta.hidden_start;
                 let hid_end   = hid_start + meta.outer_slots;
                 let hid_alloc = hid_end - 1;
-                let store = open_store(path, k, meta.cipher, hid_start, hid_end, hid_alloc)?;
+                let has_gen   = meta.container_id != [0u8; 16];
+                let store = open_store(path, k, meta.cipher, hid_start, hid_end, hid_alloc, has_gen)?;
                 store.load_free_list()?;
+                // Anti-rollback check
+                if has_gen {
+                    RollbackState::load().check(&meta.container_id, store.current_generation())?;
+                }
                 return Ok(VnmContainer {
-                    root_slot:   meta.root_slot,
-                    is_hidden:   true,
-                    cipher:      meta.cipher,
-                    outer_slots: meta.outer_slots,
-                    outer_limit: hid_start,
-                    label:       label_from(meta.label),
-                    created_at:  meta.created_at,
-                    k_master:    Zeroizing::new(k),
+                    root_slot:    meta.root_slot,
+                    is_hidden:    true,
+                    cipher:       meta.cipher,
+                    outer_slots:  meta.outer_slots,
+                    outer_limit:  hid_start,
+                    label:        label_from(meta.label),
+                    created_at:   meta.created_at,
+                    k_master:     Zeroizing::new(k),
                     store,
-                    path:        path.to_path_buf(),
+                    path:         path.to_path_buf(),
+                    container_id: meta.container_id,
                 });
             }
         }
@@ -465,7 +490,21 @@ impl VnmContainer {
 
     pub fn flush(&self) -> Result<()> {
         self.store.save_free_list()?;
-        self.store.flush_file()
+        self.store.flush_file()?;
+        // Persist updated generation to anti-rollback state (no-op for legacy containers)
+        if self.container_id != [0u8; 16] {
+            RollbackState::load().update(&self.container_id, self.store.current_generation())?;
+        }
+        Ok(())
+    }
+
+    /// Reset the anti-rollback baseline for this container.
+    ///
+    /// Call this after a deliberate restore from backup, so the next mount
+    /// accepts the restored (lower) generation without raising an error.
+    pub fn reset_rollback_state(&self) -> Result<()> {
+        if self.container_id == [0u8; 16] { return Ok(()); }
+        RollbackState::load().reset(&self.container_id)
     }
 }
 
@@ -477,9 +516,9 @@ fn new_k_master() -> [u8; 32] {
     k
 }
 
-fn open_store(path: &Path, k: [u8; 32], c: CipherAlgorithm, s: u64, l: u64, a: u64) -> Result<SlotStore> {
+fn open_store(path: &Path, k: [u8; 32], c: CipherAlgorithm, s: u64, l: u64, a: u64, has_gen: bool) -> Result<SlotStore> {
     let f = OpenOptions::new().read(true).write(true).open(path)?;
-    Ok(SlotStore::new(f, k, c, s, l, a))
+    Ok(SlotStore::new(f, k, c, s, l, a, has_gen))
 }
 
 fn write_bytes_at(path: &Path, offset: u64, data: &[u8]) -> Result<()> {
@@ -640,6 +679,7 @@ fn encode_header_with_password(
     body[32..40].copy_from_slice(&payload.root_slot.to_le_bytes());
     body[40..48].copy_from_slice(&payload.created_at.to_le_bytes());
     body[48..112].copy_from_slice(&payload.label);
+    body[112..128].copy_from_slice(&payload.container_id);
 
     let aad = if is_hidden { b"vnm:header:hidden:v1".as_ref() } else { b"vnm:header:outer:v1".as_ref() };
     let enc = crate::crypto::encrypt_block(&key, payload.cipher, aad, &body)?;

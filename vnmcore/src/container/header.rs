@@ -88,6 +88,9 @@ pub struct HeaderPayload {
     pub root_slot:         u64,
     pub created_at:        u64,
     pub label:             [u8; 64],
+    /// Unique container identifier used for anti-rollback tracking.
+    /// All-zeros means "old container without rollback support".
+    pub container_id:      [u8; 16],
 }
 
 /// Encode + encrypt a container header with K_master.
@@ -116,7 +119,8 @@ pub fn encode_header(
     body[32..40].copy_from_slice(&payload.root_slot.to_le_bytes());
     body[40..48].copy_from_slice(&payload.created_at.to_le_bytes());
     body[48..112].copy_from_slice(&payload.label);
-    // [112..396] reserved zeros
+    body[112..128].copy_from_slice(&payload.container_id);
+    // [128..396] reserved zeros
 
     // AAD includes the salt to bind the ciphertext to this specific container
     let aad = if is_hidden { AAD_HIDDEN } else { AAD_OUTER };
@@ -155,11 +159,13 @@ pub fn decode_header(
     let hidden_start = u64::from_le_bytes(body[24..32].try_into().unwrap());
     let root_slot    = u64::from_le_bytes(body[32..40].try_into().unwrap());
     let created_at   = u64::from_le_bytes(body[40..48].try_into().unwrap());
-    let mut label    = [0u8; 64];
+    let mut label        = [0u8; 64];
     label.copy_from_slice(&body[48..112]);
+    let mut container_id = [0u8; 16];
+    container_id.copy_from_slice(&body[112..128]);
 
     Ok(HeaderPayload { cipher, kdf_profile, num_password_slots: num_pw, num_key_slots: num_key,
-        outer_slots, hidden_start, root_slot, created_at, label })
+        outer_slots, hidden_start, root_slot, created_at, label, container_id })
 }
 
 /// Read plaintext fields from a raw header (cipher, kdf_profile, slot counts).

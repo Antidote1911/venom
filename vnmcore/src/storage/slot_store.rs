@@ -13,6 +13,7 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rand::RngCore;
 use zeroize::Zeroizing;
@@ -37,6 +38,13 @@ pub struct SlotStore {
     alloc_slot:  u64,
     /// In-memory sorted free list (descending so pop() = lowest free slot).
     pub free:    Mutex<Vec<u64>>,
+    /// Monotonically increasing write counter, stored in the allocation block.
+    /// Incremented on every `save_free_list()` call.
+    /// Zero for old containers that pre-date anti-rollback support.
+    generation:  AtomicU64,
+    /// Whether this container uses the new allocation block format (n + generation + bitmap).
+    /// False for containers with container_id == [0; 16] (created before anti-rollback).
+    has_generation: bool,
 }
 
 impl SlotStore {
@@ -47,6 +55,7 @@ impl SlotStore {
         slot_start: u64,
         slot_limit: u64,
         alloc_slot: u64,
+        has_generation: bool,
     ) -> Self {
         Self {
             file: Mutex::new(file),
@@ -56,6 +65,8 @@ impl SlotStore {
             slot_limit,
             alloc_slot,
             free: Mutex::new(vec![]),
+            generation: AtomicU64::new(0),
+            has_generation,
         }
     }
 
@@ -136,33 +147,43 @@ impl SlotStore {
         free.insert(pos, slot);
     }
 
+    /// Current anti-rollback generation counter (0 for legacy containers).
+    pub fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
     /// Load the allocation state from disk into the in-memory free list.
     ///
-    /// On-disk format (inside the alloc slot's plaintext payload):
-    ///   [0..8]  total_slots u64 LE  (number of bits in the bitmap)
-    ///   [8..]   bitmap: bit `i` = 1 → slot (slot_start + i) is FREE
+    /// On-disk format — legacy (container_id == [0;16]):
+    ///   [0..8]  total_slots u64 LE
+    ///   [8..]   bitmap: bit i = 1 → slot (slot_start + i) is FREE
     ///
-    /// A bitmap of N slots uses ceil(N/8) bytes. For 1 M slots that's 128 KB,
-    /// which exceeds one slot (32 KB). Venom therefore caps usable volume size
-    /// at (SLOT_SIZE − 4 prefix − 36 crypto − 8 header) × 8 × SLOT_SIZE ≈ 8 GB
-    /// per volume. Larger containers are rejected at creation time.
+    /// On-disk format — new (has_generation = true):
+    ///   [0..8]  total_slots u64 LE
+    ///   [8..16] generation  u64 LE  (monotonically increasing, anti-rollback)
+    ///   [16..]  bitmap
     pub fn load_free_list(&self) -> Result<()> {
+        let min_len = if self.has_generation { 16 } else { 8 };
         match self.read(self.alloc_slot) {
-            Ok(data) if data.len() >= 8 => {
+            Ok(data) if data.len() >= min_len => {
                 let n = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-                let bitmap = &data[8..];
+                let (gen, bitmap) = if self.has_generation {
+                    let g = u64::from_le_bytes(data[8..16].try_into().unwrap());
+                    (g, &data[16..])
+                } else {
+                    (0u64, &data[8..])
+                };
+                self.generation.store(gen, Ordering::Relaxed);
                 let mut list: Vec<u64> = Vec::new();
                 for i in 0..n {
-                    if (bitmap[i / 8] >> (i % 8)) & 1 == 1 {
+                    if bitmap.get(i / 8).map(|b| (b >> (i % 8)) & 1 == 1).unwrap_or(false) {
                         list.push(self.slot_start + i as u64);
                     }
                 }
-                // Sort descending so pop() yields the lowest-numbered free slot.
                 list.sort_unstable_by(|a, b| b.cmp(a));
                 *self.free.lock().unwrap() = list;
             }
             _ => {
-                // Fresh container — every slot except the alloc block is free.
                 self.rebuild_free_list();
             }
         }
@@ -170,6 +191,7 @@ impl SlotStore {
     }
 
     /// Persist the in-memory free list as a compact bitmap.
+    /// Increments the generation counter if `has_generation` is true.
     pub fn save_free_list(&self) -> Result<()> {
         let free = self.free.lock().unwrap();
         let n    = (self.slot_limit - self.slot_start) as usize;
@@ -178,10 +200,18 @@ impl SlotStore {
             let i = (slot - self.slot_start) as usize;
             bitmap[i / 8] |= 1 << (i % 8);
         }
-        let mut data = Vec::with_capacity(8 + bitmap.len());
+        let new_gen = if self.has_generation {
+            self.generation.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            0
+        };
+        let mut data = Vec::with_capacity(16 + bitmap.len());
         data.extend_from_slice(&(n as u64).to_le_bytes());
+        if self.has_generation {
+            data.extend_from_slice(&new_gen.to_le_bytes());
+        }
         data.extend_from_slice(&bitmap);
-        drop(free); // release lock before writing to disk
+        drop(free);
         self.write(self.alloc_slot, &data)
     }
 
