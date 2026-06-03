@@ -1,5 +1,6 @@
 #include "VenomCore.h"
 #include "MountWorker.h"
+#include <QFile>
 #include <QMetaType>
 
 namespace Venom {
@@ -41,6 +42,7 @@ void VenomCore::createContainer(const QString&     path,
             QString msg = err ? QString::fromUtf8(err) : "Failed to add key recipient";
             vnm_free_string(err);
             vnm_container_free(h);
+            QFile::remove(path);   // clean up the partially-created container
             emit errorOccurred(msg);
             return;
         }

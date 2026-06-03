@@ -233,20 +233,30 @@ pub extern "C" fn vnm_unmount(mountpoint: *const c_char) -> bool {
 
 // ── Recipient management ──────────────────────────────────────────────────────
 
-/// Add a hybrid key recipient using a .pub file.
+/// Add a hybrid key recipient using a .pub or .key file.
+/// Accepts both public-only (.pub) and full keypair (.key) files.
 #[no_mangle]
 pub extern "C" fn vnm_container_add_key_recipient(
-    handle: *const VnmHandle, pub_path: *const c_char, error_out: *mut *mut c_char,
+    handle: *const VnmHandle, key_path: *const c_char, error_out: *mut *mut c_char,
 ) -> bool {
     clear_error(error_out);
     if handle.is_null() { return false; }
-    let Some(pp) = cstr(pub_path) else { return false; };
-    match vnmcore::read_pub_file(std::path::Path::new(pp)) {
-        Err(e) => { set_error(&e.to_string(), error_out); false }
-        Ok(d) => match unsafe { (*handle).container.add_key_recipient(&d.public) } {
-            Ok(_)  => true,
-            Err(e) => { set_error(&e.to_string(), error_out); false }
+    let Some(kp) = cstr(key_path) else { return false; };
+    let path = std::path::Path::new(kp);
+
+    // Try .pub first, then fall back to reading the public part of a .key file.
+    let public_key = if let Ok(d) = vnmcore::read_pub_file(path) {
+        d.public
+    } else {
+        match read_key_public(path) {
+            Ok(d)  => d.public,
+            Err(e) => { set_error(&e.to_string(), error_out); return false; }
         }
+    };
+
+    match unsafe { (*handle).container.add_key_recipient(&public_key) } {
+        Ok(_)  => true,
+        Err(e) => { set_error(&e.to_string(), error_out); false }
     }
 }
 
