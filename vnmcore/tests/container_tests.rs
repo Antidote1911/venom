@@ -1,8 +1,8 @@
 use vnmcore::container::CipherAlgorithm;
 use vnmcore::fs::container::{VnmContainer, HiddenVolumeOptions, OpenCredential};
 use vnmcore::storage::{VaultNode, NodeKind};
-use vnmcore::storage::vault_fs::{DirectoryBlock, DirEntry, FileBlock};
-use vnmcore::{hybrid_generate, HybridPrivateKey};
+use vnmcore::storage::vault_fs::FileBlock;
+use vnmcore::hybrid_generate;
 
 const MB: u64 = 1024 * 1024;
 
@@ -70,11 +70,15 @@ fn write_and_read_file_node() {
         "interactive", None, None).unwrap();
     let content = b"Hello, Venom!".to_vec();
     let file = VaultNode::File(FileBlock {
-        kind: NodeKind::File, total_size: content.len() as u64, next_slot: None, data: content.clone(),
+        kind: NodeKind::File, total_size: content.len() as u64,
+        data_slots: vec![], index_chain: None, data: content.clone(),
     });
     let slot = c.write_node(&file).unwrap();
     match c.read_node(slot).unwrap() {
-        VaultNode::File(f) => { assert_eq!(f.data, content); assert_eq!(f.total_size, content.len() as u64); }
+        VaultNode::File(f) => {
+            assert_eq!(f.data, content);
+            assert_eq!(f.total_size, content.len() as u64);
+        }
         _ => panic!("expected file"),
     }
     std::fs::remove_file(&path).ok();
@@ -88,7 +92,8 @@ fn data_survives_reopen() {
         "interactive", Some("vault".into()), None).unwrap();
     let content = b"persistent".to_vec();
     let file = VaultNode::File(FileBlock {
-        kind: NodeKind::File, total_size: content.len() as u64, next_slot: None, data: content.clone(),
+        kind: NodeKind::File, total_size: content.len() as u64,
+        data_slots: vec![], index_chain: None, data: content.clone(),
     });
     let slot = c.write_node(&file).unwrap();
     c.flush().unwrap();
@@ -125,6 +130,7 @@ fn hidden_volume_both_passwords_work() {
 }
 
 // ── ML-KEM multi-recipient ────────────────────────────────────────────────────
+
 
 #[test]
 fn hybrid_kem_round_trip() {
